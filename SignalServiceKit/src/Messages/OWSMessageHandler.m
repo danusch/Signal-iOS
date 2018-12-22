@@ -34,6 +34,8 @@ NSString *envelopeAddress(SSKProtoEnvelope *envelope)
             return @"KeyExchange";
         case SSKProtoEnvelopeTypePrekeyBundle:
             return @"PreKeyEncryptedMessage";
+        case SSKProtoEnvelopeTypeUnidentifiedSender:
+            return @"UnidentifiedSender";
         default:
             // Shouldn't happen
             OWSProdFail([OWSAnalyticsEvents messageManagerErrorEnvelopeTypeOther]);
@@ -69,6 +71,8 @@ NSString *envelopeAddress(SSKProtoEnvelope *envelope)
         return [NSString stringWithFormat:@"<NullMessage: %@ />", content.nullMessage];
     } else if (content.receiptMessage) {
         return [NSString stringWithFormat:@"<ReceiptMessage: %@ />", content.receiptMessage];
+    } else if (content.typingMessage) {
+        return [NSString stringWithFormat:@"<TypingMessage: %@ />", content.typingMessage];
     } else {
         // Don't fire an analytics event; if we ever add a new content type, we'd generate a ton of
         // analytics traffic.

@@ -6,6 +6,8 @@
 #import <SignalServiceKit/AppContext.h>
 #import <SignalServiceKit/NSNotificationCenter+OWS.h>
 #import <SignalServiceKit/NSUserDefaults+OWS.h>
+#import <SignalServiceKit/OWSSyncManagerProtocol.h>
+#import <SignalServiceKit/SSKEnvironment.h>
 #import <SignalServiceKit/TSStorageHeaders.h>
 #import <SignalServiceKit/YapDatabaseConnection+OWS.h>
 #import <SignalServiceKit/YapDatabaseTransaction+OWS.h>
@@ -27,6 +29,8 @@ NSString *const OWSPreferencesKeyCallKitPrivacyEnabled = @"CallKitPrivacyEnabled
 NSString *const OWSPreferencesKeyCallsHideIPAddress = @"CallsHideIPAddress";
 NSString *const OWSPreferencesKeyHasDeclinedNoContactsView = @"hasDeclinedNoContactsView";
 NSString *const OWSPreferencesKeyHasGeneratedThumbnails = @"OWSPreferencesKeyHasGeneratedThumbnails";
+NSString *const OWSPreferencesKeyShouldShowUnidentifiedDeliveryIndicators
+    = @"OWSPreferencesKeyShouldShowUnidentifiedDeliveryIndicators";
 NSString *const OWSPreferencesKeyIOSUpgradeNagDate = @"iOSUpgradeNagDate";
 NSString *const OWSPreferencesKey_IsReadyForAppExtensions = @"isReadyForAppExtensions_5";
 NSString *const OWSPreferencesKeySystemCallLogEnabled = @"OWSPreferencesKeySystemCallLogEnabled";
@@ -186,6 +190,19 @@ NSString *const OWSPreferencesKeySystemCallLogEnabled = @"OWSPreferencesKeySyste
 - (nullable NSDate *)iOSUpgradeNagDate
 {
     return [self tryGetValueForKey:OWSPreferencesKeyIOSUpgradeNagDate];
+}
+
+- (BOOL)shouldShowUnidentifiedDeliveryIndicators
+{
+    NSNumber *preference = [self tryGetValueForKey:OWSPreferencesKeyShouldShowUnidentifiedDeliveryIndicators];
+    return preference ? [preference boolValue] : NO;
+}
+
+- (void)setShouldShowUnidentifiedDeliveryIndicators:(BOOL)value
+{
+    [self setValueForKey:OWSPreferencesKeyShouldShowUnidentifiedDeliveryIndicators toValue:@(value)];
+
+    [SSKEnvironment.shared.syncManager sendConfigurationSyncMessage];
 }
 
 #pragma mark - Calling

@@ -4,6 +4,7 @@
 
 #import "OWSOperation.h"
 #import "NSError+MessageSending.h"
+#import "NSTimer+OWS.h"
 #import "OWSBackgroundTask.h"
 #import "OWSError.h"
 
@@ -17,6 +18,8 @@ NSString *const OWSOperationKeyIsFinished = @"isFinished";
 @property (nullable) NSError *failingError;
 @property (atomic) OWSOperationState operationState;
 @property (nonatomic) OWSBackgroundTask *backgroundTask;
+@property (nonatomic) NSTimer *_Nullable retryTimer;
+@property (nonatomic, readonly) dispatch_queue_t retryTimerSerialQueue;
 
 @end
 
@@ -31,7 +34,8 @@ NSString *const OWSOperationKeyIsFinished = @"isFinished";
 
     _operationState = OWSOperationStateNew;
     _backgroundTask = [OWSBackgroundTask backgroundTaskWithLabel:self.logTag];
-    
+    _retryTimerSerialQueue = dispatch_queue_create("SignalServiceKit.OWSOperation.retryTimer", DISPATCH_QUEUE_SERIAL);
+
     // Operations are not retryable by default.
     _remainingRetries = 0;
 
@@ -91,6 +95,13 @@ NSString *const OWSOperationKeyIsFinished = @"isFinished";
     // Override in subclass if necessary
 }
 
+// Called zero or more times, retry may be possible
+- (void)didReportError:(NSError *)error
+{
+    // no-op
+    // Override in subclass if necessary
+}
+
 // Called at most one time, once retry is no longer possible.
 - (void)didFailWithError:(NSError *)error
 {
@@ -116,6 +127,22 @@ NSString *const OWSOperationKeyIsFinished = @"isFinished";
     }
     
     [self run];
+}
+
+- (void)runAnyQueuedRetry
+{
+    __block NSTimer *_Nullable retryTimer;
+    dispatch_sync(self.retryTimerSerialQueue, ^{
+        retryTimer = self.retryTimer;
+        self.retryTimer = nil;
+        [retryTimer invalidate];
+    });
+
+    if (retryTimer != nil) {
+        [self run];
+    } else {
+        OWSLogVerbose(@"not re-running since operation is already running.");
+    }
 }
 
 #pragma mark - Public Methods
@@ -144,6 +171,8 @@ NSString *const OWSOperationKeyIsFinished = @"isFinished";
         error.isRetryable,
         (unsigned long)self.remainingRetries);
 
+    [self didReportError:error];
+
     if (error.isFatal) {
         [self failOperationWithError:error];
         return;
@@ -161,11 +190,21 @@ NSString *const OWSOperationKeyIsFinished = @"isFinished";
 
     self.remainingRetries--;
 
-    // TODO Do we want some kind of exponential backoff?
-    // I'm not sure that there is a one-size-fits all backoff approach
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        [self run];
+    dispatch_sync(self.retryTimerSerialQueue, ^{
+        OWSAssertDebug(self.retryTimer == nil);
+        [self.retryTimer invalidate];
+        self.retryTimer = [NSTimer weakScheduledTimerWithTimeInterval:self.retryInterval
+                                                               target:self
+                                                             selector:@selector(runAnyQueuedRetry)
+                                                             userInfo:nil
+                                                              repeats:NO];
     });
+}
+
+// Override in subclass if you want something more sophisticated, e.g. exponential backoff
+- (NSTimeInterval)retryInterval
+{
+    return 0.1;
 }
 
 #pragma mark - Life Cycle

@@ -7,8 +7,8 @@
 #import "NSData+Image.h"
 #import "OWSFileSystem.h"
 #import "TSAttachmentPointer.h"
-#import "Threading.h"
 #import <AVFoundation/AVFoundation.h>
+#import <SignalCoreKit/Threading.h>
 #import <SignalServiceKit/SignalServiceKit-Swift.h>
 #import <YapDatabase/YapDatabase.h>
 
@@ -39,9 +39,6 @@ typedef void (^OWSLoadedThumbnailSuccess)(OWSLoadedThumbnail *loadedThumbnail);
 // This property should only be accessed on the main thread.
 @property (nullable, nonatomic) NSNumber *cachedAudioDurationSeconds;
 
-// Optional property.  Only set for attachments which need "lazy backup restore."
-@property (nonatomic, nullable) NSString *lazyRestoreFragmentId;
-
 @property (atomic, nullable) NSNumber *isValidImageCached;
 @property (atomic, nullable) NSNumber *isValidVideoCached;
 
@@ -54,8 +51,14 @@ typedef void (^OWSLoadedThumbnailSuccess)(OWSLoadedThumbnail *loadedThumbnail);
 - (instancetype)initWithContentType:(NSString *)contentType
                           byteCount:(UInt32)byteCount
                      sourceFilename:(nullable NSString *)sourceFilename
+                            caption:(nullable NSString *)caption
+                     albumMessageId:(nullable NSString *)albumMessageId
 {
-    self = [super initWithContentType:contentType byteCount:byteCount sourceFilename:sourceFilename];
+    self = [super initWithContentType:contentType
+                            byteCount:byteCount
+                       sourceFilename:sourceFilename
+                              caption:caption
+                       albumMessageId:albumMessageId];
     if (!self) {
         return self;
     }
@@ -186,7 +189,7 @@ typedef void (^OWSLoadedThumbnailSuccess)(OWSLoadedThumbnail *loadedThumbnail);
         OWSFailDebug(@"Missing path for attachment.");
         return NO;
     }
-    OWSLogInfo(@"Writing attachment to file: %@", filePath);
+    OWSLogDebug(@"Writing attachment to file: %@", filePath);
     return [data writeToFile:filePath options:0 error:error];
 }
 
@@ -199,7 +202,7 @@ typedef void (^OWSLoadedThumbnailSuccess)(OWSLoadedThumbnail *loadedThumbnail);
         OWSFailDebug(@"Missing path for attachment.");
         return NO;
     }
-    OWSLogInfo(@"Writing attachment to file: %@", filePath);
+    OWSLogDebug(@"Writing attachment to file: %@", filePath);
     return [dataSource writeToPath:filePath];
 }
 
@@ -329,20 +332,21 @@ typedef void (^OWSLoadedThumbnailSuccess)(OWSLoadedThumbnail *loadedThumbnail);
     [self removeFileWithTransaction:transaction];
 }
 
-- (BOOL)isAnimated {
-    return [MIMETypeUtil isAnimated:self.contentType];
-}
+- (BOOL)isValidVisualMedia
+{
+    if (self.isImage && self.isValidImage) {
+        return YES;
+    }
 
-- (BOOL)isImage {
-    return [MIMETypeUtil isImage:self.contentType];
-}
+    if (self.isVideo && self.isValidVideo) {
+        return YES;
+    }
 
-- (BOOL)isVideo {
-    return [MIMETypeUtil isVideo:self.contentType];
-}
+    if (self.isAnimated && self.isValidImage) {
+        return YES;
+    }
 
-- (BOOL)isAudio {
-    return [MIMETypeUtil isAudio:self.contentType];
+    return NO;
 }
 
 #pragma mark - Image Validation
@@ -350,10 +354,6 @@ typedef void (^OWSLoadedThumbnailSuccess)(OWSLoadedThumbnail *loadedThumbnail);
 - (BOOL)isValidImage
 {
     OWSAssertDebug(self.isImage || self.isAnimated);
-
-    if (self.lazyRestoreFragment) {
-        return NO;
-    }
 
     @synchronized(self) {
         if (!self.isValidImageCached) {
@@ -367,10 +367,6 @@ typedef void (^OWSLoadedThumbnailSuccess)(OWSLoadedThumbnail *loadedThumbnail);
 - (BOOL)isValidVideo
 {
     OWSAssertDebug(self.isVideo);
-
-    if (self.lazyRestoreFragment) {
-        return NO;
-    }
 
     @synchronized(self) {
         if (!self.isValidVideoCached) {
@@ -564,7 +560,9 @@ typedef void (^OWSLoadedThumbnailSuccess)(OWSLoadedThumbnail *loadedThumbnail);
                 // This message has not yet been saved or has been deleted; do nothing.
                 // This isn't an error per se, but these race conditions should be
                 // _very_ rare.
-                OWSFailDebug(@"Attachment not yet saved.");
+                //
+                // An exception is incoming group avatar updates which we don't ever save.
+                OWSLogWarn(@"Attachment not yet saved.");
             }
         }];
 
@@ -618,35 +616,6 @@ typedef void (^OWSLoadedThumbnailSuccess)(OWSLoadedThumbnail *loadedThumbnail);
     }];
 
     return audioDurationSeconds;
-}
-
-- (nullable OWSBackupFragment *)lazyRestoreFragment
-{
-    if (!self.lazyRestoreFragmentId) {
-        return nil;
-    }
-    return [OWSBackupFragment fetchObjectWithUniqueID:self.lazyRestoreFragmentId];
-}
-
-- (BOOL)isOversizeText
-{
-    return [self.contentType isEqualToString:OWSMimeTypeOversizeTextMessage];
-}
-
-- (nullable NSString *)readOversizeText
-{
-    if (!self.isOversizeText) {
-        OWSFailDebug(@"oversize text attachment has unexpected content type.");
-        return nil;
-    }
-    NSError *error;
-    NSData *_Nullable data = [self readDataFromFileWithError:&error];
-    if (error || !data) {
-        OWSFailDebug(@"could not read oversize text attachment: %@.", error);
-        return nil;
-    }
-    NSString *_Nullable string = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-    return string;
 }
 
 #pragma mark - Thumbnails
@@ -714,6 +683,9 @@ typedef void (^OWSLoadedThumbnailSuccess)(OWSLoadedThumbnail *loadedThumbnail);
 {
     CGSize originalSize = self.imageSize;
     if (originalSize.width < 1 || originalSize.height < 1) {
+        // Any time we return nil from this method we have to call the failure handler
+        // or else the caller waits for an async thumbnail
+        failure();
         return nil;
     }
     if (originalSize.width <= thumbnailDimensionPoints || originalSize.height <= thumbnailDimensionPoints) {
@@ -727,6 +699,9 @@ typedef void (^OWSLoadedThumbnailSuccess)(OWSLoadedThumbnail *loadedThumbnail);
         UIImage *_Nullable image = [UIImage imageWithContentsOfFile:thumbnailPath];
         if (!image) {
             OWSFailDebug(@"couldn't load image.");
+            // Any time we return nil from this method we have to call the failure handler
+            // or else the caller waits for an async thumbnail
+            failure();
             return nil;
         }
         return [[OWSLoadedThumbnail alloc] initWithImage:image filePath:thumbnailPath];
@@ -825,34 +800,6 @@ typedef void (^OWSLoadedThumbnailSuccess)(OWSLoadedThumbnail *loadedThumbnail);
 
 #pragma mark - Update With... Methods
 
-- (void)markForLazyRestoreWithFragment:(OWSBackupFragment *)lazyRestoreFragment
-                           transaction:(YapDatabaseReadWriteTransaction *)transaction
-{
-    OWSAssertDebug(lazyRestoreFragment);
-    OWSAssertDebug(transaction);
-
-    if (!lazyRestoreFragment.uniqueId) {
-        // If metadata hasn't been saved yet, save now.
-        [lazyRestoreFragment saveWithTransaction:transaction];
-
-        OWSAssertDebug(lazyRestoreFragment.uniqueId);
-    }
-    [self applyChangeToSelfAndLatestCopy:transaction
-                             changeBlock:^(TSAttachmentStream *attachment) {
-                                 [attachment setLazyRestoreFragmentId:lazyRestoreFragment.uniqueId];
-                             }];
-}
-
-- (void)updateWithLazyRestoreComplete
-{
-    [self.dbReadWriteConnection readWriteWithBlock:^(YapDatabaseReadWriteTransaction *transaction) {
-        [self applyChangeToSelfAndLatestCopy:transaction
-                                 changeBlock:^(TSAttachmentStream *attachment) {
-                                     [attachment setLazyRestoreFragmentId:nil];
-                                 }];
-    }];
-}
-
 - (nullable TSAttachmentStream *)cloneAsThumbnail
 {
     NSData *_Nullable thumbnailData = self.thumbnailDataSmallSync;
@@ -866,7 +813,9 @@ typedef void (^OWSLoadedThumbnailSuccess)(OWSLoadedThumbnail *loadedThumbnail);
     TSAttachmentStream *thumbnailAttachment =
         [[TSAttachmentStream alloc] initWithContentType:OWSMimeTypeImageJpeg
                                               byteCount:(uint32_t)thumbnailData.length
-                                         sourceFilename:thumbnailName];
+                                         sourceFilename:thumbnailName
+                                                caption:nil
+                                         albumMessageId:nil];
 
     NSError *error;
     BOOL success = [thumbnailAttachment writeData:thumbnailData error:&error];
@@ -900,15 +849,18 @@ typedef void (^OWSLoadedThumbnailSuccess)(OWSLoadedThumbnail *loadedThumbnail);
 
 - (nullable SSKProtoAttachmentPointer *)buildProto
 {
-    SSKProtoAttachmentPointerBuilder *builder = [SSKProtoAttachmentPointerBuilder new];
-
-    builder.id = self.serverId;
+    SSKProtoAttachmentPointerBuilder *builder = [SSKProtoAttachmentPointer builderWithId:self.serverId];
 
     OWSAssertDebug(self.contentType.length > 0);
     builder.contentType = self.contentType;
 
     OWSLogVerbose(@"Sending attachment with filename: '%@'", self.sourceFilename);
-    builder.fileName = self.sourceFilename;
+    if (self.sourceFilename.length > 0) {
+        builder.fileName = self.sourceFilename;
+    }
+    if (self.caption.length > 0) {
+        builder.caption = self.caption;
+    }
 
     builder.size = self.byteCount;
     builder.key = self.encryptionKey;

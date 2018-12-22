@@ -6,15 +6,15 @@
 #import "OWSIdentityManager.h"
 #import "OWSPrimaryStorage.h"
 #import "OWSRecipientIdentity.h"
-#import "SSKBaseTest.h"
+#import "SSKBaseTestObjC.h"
 #import "SSKEnvironment.h"
 #import "YapDatabaseConnection+OWS.h"
 #import <Curve25519Kit/Curve25519.h>
-#import <Curve25519Kit/Randomness.h>
+#import <SignalCoreKit/Randomness.h>
 
 extern NSString *const OWSPrimaryStorageTrustedKeysCollection;
 
-@interface TSStorageIdentityKeyStoreTests : SSKBaseTest
+@interface TSStorageIdentityKeyStoreTests : SSKBaseTestObjC
 
 @end
 

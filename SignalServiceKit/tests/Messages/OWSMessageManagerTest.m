@@ -2,21 +2,20 @@
 //  Copyright (c) 2018 Open Whisper Systems. All rights reserved.
 //
 
-#import "OWSMessageManager.h"
 #import "ContactsManagerProtocol.h"
 #import "ContactsUpdater.h"
-#import "Cryptography.h"
 #import "MockSSKEnvironment.h"
 #import "OWSFakeCallMessageHandler.h"
-#import "OWSFakeContactsManager.h"
 #import "OWSFakeMessageSender.h"
 #import "OWSFakeNetworkManager.h"
 #import "OWSIdentityManager.h"
+#import "OWSMessageManager.h"
 #import "OWSMessageSender.h"
 #import "OWSPrimaryStorage.h"
-#import "SSKBaseTest.h"
+#import "SSKBaseTestObjC.h"
 #import "TSGroupThread.h"
 #import "TSNetworkManager.h"
+#import <SignalCoreKit/Cryptography.h>
 #import <SignalServiceKit/SignalServiceKit-Swift.h>
 
 NS_ASSUME_NONNULL_BEGIN
@@ -42,7 +41,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 #pragma mark -
 
-@interface OWSMessageManagerTest : SSKBaseTest
+@interface OWSMessageManagerTest : SSKBaseTestObjC
 
 @end
 
@@ -63,19 +62,19 @@ NS_ASSUME_NONNULL_BEGIN
 
     OWSAssert([SSKEnvironment.shared.messageSender isKindOfClass:[OWSFakeMessageSender class]]);
     OWSFakeMessageSender *fakeMessageSender = (OWSFakeMessageSender *)SSKEnvironment.shared.messageSender;
-    fakeMessageSender.enqueueTemporaryAttachmentBlock = ^{
+    fakeMessageSender.sendTemporaryAttachmentWasCalledBlock = ^{
         [messageWasSent fulfill];
     };
 
     OWSMessageManager *messagesManager = OWSMessageManager.sharedManager;
 
-    SSKProtoSyncMessageRequestBuilder *requestBuilder = [SSKProtoSyncMessageRequestBuilder new];
+    SSKProtoSyncMessageRequestBuilder *requestBuilder = [SSKProtoSyncMessageRequest builder];
     [requestBuilder setType:SSKProtoSyncMessageRequestTypeGroups];
 
-    SSKProtoSyncMessageBuilder *messageBuilder = [SSKProtoSyncMessageBuilder new];
+    SSKProtoSyncMessageBuilder *messageBuilder = [SSKProtoSyncMessage builder];
     [messageBuilder setRequest:[requestBuilder buildIgnoringErrors]];
 
-    SSKProtoEnvelopeBuilder *envelopeBuilder = [SSKProtoEnvelopeBuilder new];
+    SSKProtoEnvelopeBuilder *envelopeBuilder = [SSKProtoEnvelope builder];
     [envelopeBuilder setType:SSKProtoEnvelopeTypeCiphertext];
     [envelopeBuilder setSource:@"+13213214321"];
     [envelopeBuilder setSourceDevice:1];
@@ -86,7 +85,7 @@ NS_ASSUME_NONNULL_BEGIN
 
     [self waitForExpectationsWithTimeout:5
                                  handler:^(NSError *error) {
-                                     NSLog(@"No message submitted.");
+                                     OWSLogInfo(@"No message submitted.");
                                  }];
 }
 
@@ -99,14 +98,14 @@ NS_ASSUME_NONNULL_BEGIN
 
     OWSMessageManager *messagesManager = SSKEnvironment.shared.messageManager;
 
-    SSKProtoEnvelopeBuilder *envelopeBuilder = [SSKProtoEnvelopeBuilder new];
+    SSKProtoEnvelopeBuilder *envelopeBuilder = [SSKProtoEnvelope builder];
 
-    SSKProtoGroupContextBuilder *groupContextBuilder = [SSKProtoGroupContextBuilder new];
+    SSKProtoGroupContextBuilder *groupContextBuilder = [SSKProtoGroupContext builder];
     groupContextBuilder.name = @"Newly created Group Name";
     groupContextBuilder.id = groupIdData;
     groupContextBuilder.type = SSKProtoGroupContextTypeUpdate;
 
-    SSKProtoDataMessageBuilder *messageBuilder = [SSKProtoDataMessageBuilder new];
+    SSKProtoDataMessageBuilder *messageBuilder = [SSKProtoDataMessage builder];
     messageBuilder.group = [groupContextBuilder buildIgnoringErrors];
 
     [messagesManager handleIncomingEnvelope:[envelopeBuilder buildIgnoringErrors]
@@ -126,21 +125,21 @@ NS_ASSUME_NONNULL_BEGIN
 
     OWSMessageManager *messagesManager = SSKEnvironment.shared.messageManager;
 
-    SSKProtoEnvelopeBuilder *envelopeBuilder = [SSKProtoEnvelopeBuilder new];
+    SSKProtoEnvelopeBuilder *envelopeBuilder = [SSKProtoEnvelope builder];
 
-    SSKProtoGroupContextBuilder *groupContextBuilder = [SSKProtoGroupContextBuilder new];
+    SSKProtoGroupContextBuilder *groupContextBuilder = [SSKProtoGroupContext builder];
     groupContextBuilder.name = @"Newly created Group with Avatar Name";
     groupContextBuilder.id = groupIdData;
     groupContextBuilder.type = SSKProtoGroupContextTypeUpdate;
 
-    SSKProtoAttachmentPointerBuilder *attachmentBuilder = [SSKProtoAttachmentPointerBuilder new];
+    SSKProtoAttachmentPointerBuilder *attachmentBuilder = [SSKProtoAttachmentPointer builder];
     attachmentBuilder.id = 1234;
     attachmentBuilder.contentType = @"image/png";
     attachmentBuilder.key = [NSData new];
     attachmentBuilder.size = 123;
     groupContextBuilder.avatar = [attachmentBuilder buildIgnoringErrors];
 
-    SSKProtoDataMessageBuilder *messageBuilder = [SSKProtoDataMessageBuilder new];
+    SSKProtoDataMessageBuilder *messageBuilder = [SSKProtoDataMessage builder];
     messageBuilder.group = [groupContextBuilder buildIgnoringErrors];
 
     [messagesManager handleIncomingEnvelope:[envelopeBuilder buildIgnoringErrors]
@@ -161,16 +160,16 @@ NS_ASSUME_NONNULL_BEGIN
 
     OWSMessageManager *messagesManager = SSKEnvironment.shared.messageManager;
 
-    SSKProtoEnvelopeBuilder *envelopeBuilder = [SSKProtoEnvelopeBuilder new];
+    SSKProtoEnvelopeBuilder *envelopeBuilder = [SSKProtoEnvelope builder];
 
-    SSKProtoGroupContextBuilder *groupContextBuilder = [SSKProtoGroupContextBuilder new];
+    SSKProtoGroupContextBuilder *groupContextBuilder = [SSKProtoGroupContext builder];
     groupContextBuilder.name = @"Newly created Group with Avatar Name";
     groupContextBuilder.id = groupIdData;
 
     // e.g. some future feature sent from another device that we don't yet support.
     groupContextBuilder.type = 666;
 
-    SSKProtoDataMessageBuilder *messageBuilder = [SSKProtoDataMessageBuilder new];
+    SSKProtoDataMessageBuilder *messageBuilder = [SSKProtoDataMessage builder];
     messageBuilder.group = [groupContextBuilder buildIgnoringErrors];
 
     [messagesManager handleIncomingEnvelope:[envelopeBuilder buildIgnoringErrors]

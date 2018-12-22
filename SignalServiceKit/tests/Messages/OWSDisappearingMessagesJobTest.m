@@ -3,16 +3,17 @@
 //
 
 #import "OWSDisappearingMessagesJob.h"
-#import "NSDate+OWS.h"
 #import "OWSDisappearingMessagesConfiguration.h"
 #import "OWSDisappearingMessagesFinder.h"
-#import "OWSFakeContactsManager.h"
 #import "OWSPrimaryStorage.h"
-#import "SSKBaseTest.h"
+#import "SSKBaseTestObjC.h"
 #import "TSContactThread.h"
 #import "TSMessage.h"
+#import <SignalCoreKit/NSDate+OWS.h>
 
 NS_ASSUME_NONNULL_BEGIN
+
+#ifdef BROKEN_TESTS
 
 @interface OWSDisappearingMessagesJob (Testing)
 
@@ -20,7 +21,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 @end
 
-@interface OWSDisappearingMessagesJobTest : SSKBaseTest
+@interface OWSDisappearingMessagesJobTest : SSKBaseTestObjC
 
 @property TSThread *thread;
 
@@ -130,5 +131,7 @@ NS_ASSUME_NONNULL_BEGIN
 }
 
 @end
+
+#endif
 
 NS_ASSUME_NONNULL_END

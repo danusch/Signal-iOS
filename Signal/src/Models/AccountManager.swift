@@ -13,30 +13,36 @@ import SignalServiceKit
 @objc
 public class AccountManager: NSObject {
 
-    let textSecureAccountManager: TSAccountManager
-    let networkManager: TSNetworkManager
-    let preferences: OWSPreferences
-
     var pushManager: PushManager {
         // dependency injection hack since PushManager has *alot* of dependencies, and would induce a cycle.
         return PushManager.shared()
     }
 
     @objc
-    public required init(textSecureAccountManager: TSAccountManager, preferences: OWSPreferences) {
-        self.networkManager = textSecureAccountManager.networkManager
-        self.textSecureAccountManager = textSecureAccountManager
-        self.preferences = preferences
-
+    public override init() {
         super.init()
 
         SwiftSingletons.register(self)
     }
 
+    // MARK: - Dependencies
+
+    private var networkManager: TSNetworkManager {
+        return SSKEnvironment.shared.networkManager
+    }
+
+    private var preferences: OWSPreferences {
+        return Environment.shared.preferences
+    }
+
+    private var tsAccountManager: TSAccountManager {
+        return TSAccountManager.sharedInstance()
+    }
+
     // MARK: registration
 
-    @objc func register(verificationCode: String,
-                        pin: String?) -> AnyPromise {
+    @objc func registerObjc(verificationCode: String,
+                            pin: String?) -> AnyPromise {
         return AnyPromise(register(verificationCode: verificationCode, pin: pin))
     }
 
@@ -61,11 +67,13 @@ public class AccountManager: NSObject {
                 // - simulators, none of which support receiving push notifications
                 // - on iOS11 devices which have disabled "Allow Notifications" and disabled "Enable Background Refresh" in the system settings.
                 Logger.info("Recovered push registration error. Registering for manual message fetcher because push not supported: \(description)")
-                return self.registerForManualMessageFetching()
+                return self.enableManualMessageFetching()
             default:
                 throw error
             }
-        }.then {
+        }.then { (_) in
+            self.tsAccountManager.performUpdateAccountAttributes()
+        }.done { (_) in
             self.completeRegistration()
         }
 
@@ -76,11 +84,11 @@ public class AccountManager: NSObject {
 
     private func registerForTextSecure(verificationCode: String,
                                        pin: String?) -> Promise<Void> {
-        return Promise { fulfill, reject in
-            self.textSecureAccountManager.verifyAccount(withCode: verificationCode,
+        return Promise { resolver in
+            tsAccountManager.verifyAccount(withCode: verificationCode,
                                                         pin: pin,
-                                                        success: fulfill,
-                                                        failure: reject)
+                                                        success: resolver.fulfill,
+                                                        failure: resolver.reject)
         }
     }
 
@@ -93,48 +101,46 @@ public class AccountManager: NSObject {
 
     private func completeRegistration() {
         Logger.info("")
-        self.textSecureAccountManager.didRegister()
+        tsAccountManager.didRegister()
     }
 
     // MARK: Message Delivery
 
     func updatePushTokens(pushToken: String, voipToken: String) -> Promise<Void> {
-        return Promise { fulfill, reject in
-            self.textSecureAccountManager.registerForPushNotifications(pushToken: pushToken,
-                                                                       voipToken: voipToken,
-                                                                       success: fulfill,
-                                                                       failure: reject)
+        return Promise { resolver in
+            tsAccountManager.registerForPushNotifications(pushToken: pushToken,
+                                                          voipToken: voipToken,
+                                                          success: resolver.fulfill,
+                                                          failure: resolver.reject)
         }
     }
 
-    func registerForManualMessageFetching() -> Promise<Void> {
-        return Promise { fulfill, reject in
-            self.textSecureAccountManager.registerForManualMessageFetching(success: fulfill, failure: reject)
-        }
+    func enableManualMessageFetching() -> Promise<Void> {
+        let anyPromise = tsAccountManager.setIsManualMessageFetchEnabled(true)
+        return Promise(anyPromise).asVoid()
     }
 
     // MARK: Turn Server
 
     func getTurnServerInfo() -> Promise<TurnServerInfo> {
-        return Promise { fulfill, reject in
+        return Promise { resolver in
             self.networkManager.makeRequest(OWSRequestFactory.turnServerInfoRequest(),
                                             success: { (_: URLSessionDataTask, responseObject: Any?) in
                                                 guard responseObject != nil else {
-                                                    return reject(OWSErrorMakeUnableToProcessServerResponseError())
+                                                    return resolver.reject(OWSErrorMakeUnableToProcessServerResponseError())
                                                 }
 
                                                 if let responseDictionary = responseObject as? [String: AnyObject] {
                                                     if let turnServerInfo = TurnServerInfo(attributes: responseDictionary) {
-                                                        return fulfill(turnServerInfo)
+                                                        return resolver.fulfill(turnServerInfo)
                                                     }
                                                     Logger.error("unexpected server response:\(responseDictionary)")
                                                 }
-                                                return reject(OWSErrorMakeUnableToProcessServerResponseError())
+                                                return resolver.reject(OWSErrorMakeUnableToProcessServerResponseError())
             },
                                             failure: { (_: URLSessionDataTask, error: Error) in
-                                                    return reject(error)
+                                                    return resolver.reject(error)
             })
         }
     }
-
 }

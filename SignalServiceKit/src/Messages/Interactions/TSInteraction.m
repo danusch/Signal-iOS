@@ -3,10 +3,9 @@
 //
 
 #import "TSInteraction.h"
-#import "NSDate+OWS.h"
-#import "OWSPrimaryStorage+messageIDs.h"
 #import "TSDatabaseSecondaryIndexes.h"
 #import "TSThread.h"
+#import <SignalCoreKit/NSDate+OWS.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -27,6 +26,8 @@ NSString *NSStringFromOWSInteractionType(OWSInteractionType value)
             return @"OWSInteractionType_Info";
         case OWSInteractionType_Offer:
             return @"OWSInteractionType_Offer";
+        case OWSInteractionType_TypingIndicator:
+            return @"OWSInteractionType_TypingIndicator";
     }
 }
 
@@ -74,11 +75,29 @@ NSString *NSStringFromOWSInteractionType(OWSInteractionType value)
     return @"TSInteraction";
 }
 
+- (instancetype)initInteractionWithUniqueId:(NSString *)uniqueId
+                                  timestamp:(uint64_t)timestamp
+                                   inThread:(TSThread *)thread
+{
+    OWSAssertDebug(timestamp > 0);
+
+    self = [super initWithUniqueId:uniqueId];
+
+    if (!self) {
+        return self;
+    }
+
+    _timestamp = timestamp;
+    _uniqueThreadId = thread.uniqueId;
+
+    return self;
+}
+
 - (instancetype)initInteractionWithTimestamp:(uint64_t)timestamp inThread:(TSThread *)thread
 {
     OWSAssertDebug(timestamp > 0);
 
-    self = [super initWithUniqueId:nil];
+    self = [super initWithUniqueId:[[NSUUID UUID] UUIDString]];
 
     if (!self) {
         return self;
@@ -153,7 +172,8 @@ NSString *NSStringFromOWSInteractionType(OWSInteractionType value)
 
 - (void)saveWithTransaction:(YapDatabaseReadWriteTransaction *)transaction {
     if (!self.uniqueId) {
-        self.uniqueId = [OWSPrimaryStorage getAndIncrementMessageIdWithTransaction:transaction];
+        OWSFailDebug(self.uniqueId);
+        self.uniqueId = [NSUUID new];
     }
 
     [super saveWithTransaction:transaction];

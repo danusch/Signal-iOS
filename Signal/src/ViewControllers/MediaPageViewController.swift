@@ -3,6 +3,7 @@
 //
 
 import UIKit
+import PromiseKit
 
 // Objc wrapper for the MediaGalleryItem struct
 @objc
@@ -44,31 +45,26 @@ class MediaPageViewController: UIPageViewController, UIPageViewControllerDataSou
     }
 
     public var currentItem: MediaGalleryItem! {
-        get {
-            return currentViewController.galleryItemBox.value
-        }
-        set {
-            setCurrentItem(newValue, direction: .forward, animated: false)
-        }
+        return currentViewController.galleryItemBox.value
     }
 
-    private func setCurrentItem(_ item: MediaGalleryItem, direction: UIPageViewControllerNavigationDirection, animated isAnimated: Bool) {
+    public func setCurrentItem(_ item: MediaGalleryItem, direction: UIPageViewControllerNavigationDirection, animated isAnimated: Bool) {
         guard let galleryPage = self.buildGalleryPage(galleryItem: item) else {
-            owsFailDebug("unexpetedly unable to build new gallery page")
+            owsFailDebug("unexpectedly unable to build new gallery page")
             return
         }
 
-        self.updateTitle(item: item)
-        self.setViewControllers([galleryPage], direction: direction, animated: isAnimated)
-        self.updateFooterBarButtonItems(isPlayingVideo: false)
+        updateTitle(item: item)
+        updateCaption(item: item)
+        setViewControllers([galleryPage], direction: direction, animated: isAnimated)
+        updateFooterBarButtonItems(isPlayingVideo: false)
+        updateMediaRail()
     }
 
     private let uiDatabaseConnection: YapDatabaseConnection
 
     private let showAllMediaButton: Bool
     private let sliderEnabled: Bool
-
-    private let headerView: UIView
 
     init(initialItem: MediaGalleryItem, mediaGalleryDataSource: MediaGalleryDataSource, uiDatabaseConnection: YapDatabaseConnection, options: MediaGalleryOption) {
         assert(uiDatabaseConnection.isInLongLivedReadTransaction())
@@ -79,35 +75,15 @@ class MediaPageViewController: UIPageViewController, UIPageViewControllerDataSou
 
         let kSpacingBetweenItems: CGFloat = 20
 
-        self.headerView = UIView()
-        headerView.layoutMargins = UIEdgeInsets(top: 2, left: 8, bottom: 4, right: 8)
-
         super.init(transitionStyle: .scroll,
                    navigationOrientation: .horizontal,
                    options: [UIPageViewControllerOptionInterPageSpacingKey: kSpacingBetweenItems])
-
-        let headerStackView = UIStackView()
-        headerView.addSubview(headerStackView)
-
-        headerStackView.axis = .vertical
-        headerStackView.alignment = .center
-        headerStackView.spacing = 0
-        headerStackView.distribution = .fillProportionally
-        headerStackView.addArrangedSubview(headerNameLabel)
-        headerStackView.addArrangedSubview(headerDateLabel)
-
-        headerStackView.autoPinEdge(toSuperviewMargin: .top, relation: .greaterThanOrEqual)
-        headerStackView.autoPinEdge(toSuperviewMargin: .right, relation: .greaterThanOrEqual)
-        headerStackView.autoPinEdge(toSuperviewMargin: .bottom, relation: .greaterThanOrEqual)
-        headerStackView.autoPinEdge(toSuperviewMargin: .left, relation: .greaterThanOrEqual)
-        headerStackView.setContentHuggingHigh()
-        headerStackView.autoCenterInSuperview()
 
         self.dataSource = self
         self.delegate = self
 
         guard let initialPage = self.buildGalleryPage(galleryItem: initialItem) else {
-            owsFailDebug("unexpetedly unable to build initial gallery item")
+            owsFailDebug("unexpectedly unable to build initial gallery item")
             return
         }
         self.initialPage = initialPage
@@ -123,10 +99,17 @@ class MediaPageViewController: UIPageViewController, UIPageViewControllerDataSou
         Logger.debug("deinit")
     }
 
+    // MARK: - Subview
+
+    // MARK: Bottom Bar
+    var bottomContainer: UIView!
     var footerBar: UIToolbar!
-    var videoPlayBarButton: UIBarButtonItem!
-    var videoPauseBarButton: UIBarButtonItem!
+    let captionContainerView: CaptionContainerView = CaptionContainerView()
+    var galleryRailView: GalleryRailView = GalleryRailView()
+
     var pagerScrollView: UIScrollView!
+
+    // MARK: UIViewController overrides
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -138,8 +121,7 @@ class MediaPageViewController: UIPageViewController, UIPageViewControllerDataSou
         let backButton = OWSViewController.createOWSBackButton(withTarget: self, selector: #selector(didPressDismissButton))
         self.navigationItem.leftBarButtonItem = backButton
 
-        self.navigationItem.titleView = headerView
-        self.updateTitle()
+        self.navigationItem.titleView = portraitHeaderView
 
         if showAllMediaButton {
             self.navigationItem.rightBarButtonItem = UIBarButtonItem(title: MediaStrings.allMedia, style: .plain, target: self, action: #selector(didPressAllMediaButton))
@@ -163,26 +145,44 @@ class MediaPageViewController: UIPageViewController, UIPageViewControllerDataSou
         // e.g. when getting to media details via message details screen, there's only
         // one "Page" so the bounce doesn't make sense.
         pagerScrollView.isScrollEnabled = sliderEnabled
-
-        self.title = "Attachment"
+        pagerScrollViewContentOffsetObservation = pagerScrollView.observe(\.contentOffset, options: [.new]) { [weak self] object, change in
+            guard let strongSelf = self else { return }
+            strongSelf.pagerScrollView(strongSelf.pagerScrollView, contentOffsetDidChange: change)
+        }
 
         // Views
 
-        let kFooterHeight: CGFloat = 44
+        view.backgroundColor = Theme.darkThemeBackgroundColor
 
-        view.backgroundColor = Theme.backgroundColor
+        captionContainerView.delegate = self
+        updateCaptionContainerVisibility()
 
-        let footerBar = UIToolbar()
+        galleryRailView.delegate = self
+        galleryRailView.autoSetDimension(.height, toSize: 72)
+
+        let footerBar = self.makeClearToolbar()
         self.footerBar = footerBar
+        footerBar.tintColor = .white
 
-        self.videoPlayBarButton = UIBarButtonItem(barButtonSystemItem: .play, target: self, action: #selector(didPressPlayBarButton))
-        self.videoPauseBarButton = UIBarButtonItem(barButtonSystemItem: .pause, target: self, action: #selector(didPressPauseBarButton))
+        let bottomContainer = UIView()
+        self.bottomContainer = bottomContainer
+        bottomContainer.backgroundColor = UIColor.ows_black.withAlphaComponent(0.4)
 
-        self.updateFooterBarButtonItems(isPlayingVideo: true)
-        self.view.addSubview(footerBar)
-        footerBar.autoPinWidthToSuperview()
+        let bottomStack = UIStackView(arrangedSubviews: [captionContainerView, galleryRailView, footerBar])
+        bottomStack.axis = .vertical
+        bottomContainer.addSubview(bottomStack)
+        bottomStack.autoPinEdgesToSuperviewEdges()
+
+        self.view.addSubview(bottomContainer)
+        bottomContainer.autoPinWidthToSuperview()
+        bottomContainer.autoPinEdge(toSuperviewEdge: .bottom)
         footerBar.autoPin(toBottomLayoutGuideOf: self, withInset: 0)
-        footerBar.autoSetDimension(.height, toSize: kFooterHeight)
+        footerBar.autoSetDimension(.height, toSize: 44)
+
+        updateTitle()
+        updateCaption(item: currentItem)
+        updateMediaRail()
+        updateFooterBarButtonItems(isPlayingVideo: true)
 
         // Gestures
 
@@ -191,11 +191,34 @@ class MediaPageViewController: UIPageViewController, UIPageViewControllerDataSou
         view.addGestureRecognizer(verticalSwipe)
     }
 
+    override func viewWillTransition(to size: CGSize, with coordinator: UIViewControllerTransitionCoordinator) {
+        super.viewWillTransition(to: size, with: coordinator)
+        let isLandscape = size.width > size.height
+        self.navigationItem.titleView = isLandscape ? nil : self.portraitHeaderView
+    }
+
     override func didReceiveMemoryWarning() {
         Logger.info("")
         super.didReceiveMemoryWarning()
 
         self.cachedPages = [:]
+    }
+
+    // MARK: KVO
+
+    var pagerScrollViewContentOffsetObservation: NSKeyValueObservation?
+    func pagerScrollView(_ pagerScrollView: UIScrollView, contentOffsetDidChange change: NSKeyValueObservedChange<CGPoint>) {
+        guard let newValue = change.newValue else {
+            owsFailDebug("newValue was unexpectedly nil")
+            return
+        }
+
+        let width = pagerScrollView.frame.size.width
+        guard width > 0 else {
+            return
+        }
+        let ratioComplete = abs((newValue.x - width) / width)
+        captionContainerView.updatePagerTransition(ratioComplete: ratioComplete)
     }
 
     // MARK: View Helpers
@@ -211,6 +234,107 @@ class MediaPageViewController: UIPageViewController, UIPageViewControllerDataSou
             currentViewController.playVideo()
         }
     }
+
+    private func makeClearToolbar() -> UIToolbar {
+        let toolbar = UIToolbar()
+
+        toolbar.backgroundColor = UIColor.clear
+
+        // Making a toolbar transparent requires setting an empty uiimage
+        toolbar.setBackgroundImage(UIImage(), forToolbarPosition: .any, barMetrics: .default)
+
+        // hide 1px top-border
+        toolbar.clipsToBounds = true
+
+        return toolbar
+    }
+
+    private var shouldHideToolbars: Bool = false {
+        didSet {
+            if (oldValue == shouldHideToolbars) {
+                return
+            }
+
+            // Hiding the status bar affects the positioning of the navbar. We don't want to show that in an animation, it's
+            // better to just have everythign "flit" in/out.
+            UIApplication.shared.setStatusBarHidden(shouldHideToolbars, with: .none)
+            self.navigationController?.setNavigationBarHidden(shouldHideToolbars, animated: false)
+
+            UIView.animate(withDuration: 0.1) {
+                self.currentViewController.setShouldHideToolbars(self.shouldHideToolbars)
+                self.bottomContainer.isHidden = self.shouldHideToolbars
+            }
+        }
+    }
+
+    // MARK: Bar Buttons
+
+    lazy var shareBarButton: UIBarButtonItem = {
+        let shareBarButton = UIBarButtonItem(barButtonSystemItem: .action, target: self, action: #selector(didPressShare))
+        shareBarButton.tintColor = Theme.darkThemePrimaryColor
+        return shareBarButton
+    }()
+
+    lazy var deleteBarButton: UIBarButtonItem = {
+        let deleteBarButton = UIBarButtonItem(barButtonSystemItem: .trash,
+                                              target: self,
+                                              action: #selector(didPressDelete))
+        deleteBarButton.tintColor = Theme.darkThemePrimaryColor
+        return deleteBarButton
+    }()
+
+    func buildFlexibleSpace() -> UIBarButtonItem {
+        return UIBarButtonItem(barButtonSystemItem: .flexibleSpace, target: nil, action: nil)
+    }
+
+    lazy var videoPlayBarButton: UIBarButtonItem = {
+        let videoPlayBarButton = UIBarButtonItem(barButtonSystemItem: .play, target: self, action: #selector(didPressPlayBarButton))
+        videoPlayBarButton.tintColor = Theme.darkThemePrimaryColor
+        return videoPlayBarButton
+    }()
+
+    lazy var videoPauseBarButton: UIBarButtonItem = {
+        let videoPauseBarButton = UIBarButtonItem(barButtonSystemItem: .pause, target: self, action:
+            #selector(didPressPauseBarButton))
+        videoPauseBarButton.tintColor = Theme.darkThemePrimaryColor
+        return videoPauseBarButton
+    }()
+
+    private func updateFooterBarButtonItems(isPlayingVideo: Bool) {
+        // TODO do we still need this? seems like a vestige
+        // from when media detail view was used for attachment approval
+        if self.footerBar == nil {
+            owsFailDebug("No footer bar visible.")
+            return
+        }
+
+        var toolbarItems: [UIBarButtonItem] = [
+            shareBarButton,
+            buildFlexibleSpace()
+        ]
+
+        if (self.currentItem.isVideo) {
+            toolbarItems += [
+                isPlayingVideo ? self.videoPauseBarButton : self.videoPlayBarButton,
+                buildFlexibleSpace()
+            ]
+        }
+
+        toolbarItems.append(deleteBarButton)
+
+        self.footerBar.setItems(toolbarItems, animated: false)
+    }
+
+    func updateMediaRail() {
+        guard let currentItem = self.currentItem else {
+            owsFailDebug("currentItem was unexpectedly nil")
+            return
+        }
+
+        galleryRailView.configureCellViews(itemProvider: currentItem.album, focusedItem: currentItem, cellViewDecoratorBlock: { _ in })
+    }
+
+    // MARK: Actions
 
     @objc
     public func didPressAllMediaButton(sender: Any) {
@@ -232,57 +356,6 @@ class MediaPageViewController: UIPageViewController, UIPageViewControllerDataSou
         self.dismissSelf(animated: true)
     }
 
-    private var shouldHideToolbars: Bool = false {
-        didSet {
-            if (oldValue == shouldHideToolbars) {
-                return
-            }
-
-            // Hiding the status bar affects the positioning of the navbar. We don't want to show that in an animation, it's
-            // better to just have everythign "flit" in/out.
-            UIApplication.shared.setStatusBarHidden(shouldHideToolbars, with: .none)
-            self.navigationController?.setNavigationBarHidden(shouldHideToolbars, animated: false)
-
-            // We don't animate the background color change because the old color shows through momentarily
-            // behind where the status bar "used to be".
-            self.view.backgroundColor = (shouldHideToolbars ? UIColor.black : Theme.backgroundColor)
-
-            UIView.animate(withDuration: 0.1) {
-                self.currentViewController.setShouldHideToolbars(self.shouldHideToolbars)
-                self.footerBar.isHidden = self.shouldHideToolbars
-            }
-        }
-    }
-
-    private func updateFooterBarButtonItems(isPlayingVideo: Bool) {
-        // TODO do we still need this? seems like a vestige
-        // from when media detail view was used for attachment approval
-        if self.footerBar == nil {
-            owsFailDebug("No footer bar visible.")
-            return
-        }
-
-        var toolbarItems: [UIBarButtonItem] = [
-            UIBarButtonItem(barButtonSystemItem: .action, target: self, action: #selector(didPressShare)),
-            UIBarButtonItem(barButtonSystemItem: .flexibleSpace, target: nil, action: nil)
-        ]
-
-        if (self.currentItem.isVideo) {
-            toolbarItems += [
-                isPlayingVideo ? self.videoPauseBarButton : self.videoPlayBarButton,
-                UIBarButtonItem(barButtonSystemItem: .flexibleSpace, target: nil, action: nil)
-            ]
-        }
-
-        toolbarItems.append(UIBarButtonItem(barButtonSystemItem: .trash,
-                                            target: self,
-                                            action: #selector(didPressDelete)))
-
-        self.footerBar.setItems(toolbarItems, animated: false)
-    }
-
-    // MARK: Actions
-
     @objc
     public func didPressDismissButton(_ sender: Any) {
         dismissSelf(animated: true)
@@ -294,7 +367,10 @@ class MediaPageViewController: UIPageViewController, UIPageViewControllerDataSou
             owsFailDebug("currentViewController was unexpectedly nil")
             return
         }
-        currentViewController.didPressShare(sender)
+
+        let attachmentStream = currentViewController.galleryItem.attachmentStream
+
+        AttachmentSharing.showShareUI(forAttachment: attachmentStream)
     }
 
     @objc
@@ -378,18 +454,26 @@ class MediaPageViewController: UIPageViewController, UIPageViewControllerDataSou
 
     // MARK: UIPageViewControllerDelegate
 
+    var pendingViewController: MediaDetailViewController?
     public func pageViewController(_ pageViewController: UIPageViewController, willTransitionTo pendingViewControllers: [UIViewController]) {
         Logger.debug("")
 
         assert(pendingViewControllers.count == 1)
         pendingViewControllers.forEach { viewController in
-            guard let pendingPage = viewController as? MediaDetailViewController else {
+            guard let pendingViewController = viewController as? MediaDetailViewController else {
                 owsFailDebug("unexpected mediaDetailViewController: \(viewController)")
                 return
             }
+            self.pendingViewController = pendingViewController
+
+            if let pendingCaptionText = pendingViewController.galleryItem.captionForDisplay, pendingCaptionText.count > 0 {
+                self.captionContainerView.pendingText = pendingCaptionText
+            } else {
+                self.captionContainerView.pendingText = nil
+            }
 
             // Ensure upcoming page respects current toolbar status
-            pendingPage.setShouldHideToolbars(self.shouldHideToolbars)
+            pendingViewController.setShouldHideToolbars(self.shouldHideToolbars)
         }
     }
 
@@ -405,10 +489,21 @@ class MediaPageViewController: UIPageViewController, UIPageViewControllerDataSou
 
             // Do any cleanup for the no-longer visible view controller
             if transitionCompleted {
+                pendingViewController = nil
+
+                // This can happen when trying to page past the last (or first) view controller
+                // In that case, we don't want to change the captionView.
+                if (previousPage != currentViewController) {
+                    captionContainerView.completePagerTransition()
+                }
+
                 updateTitle()
+                updateMediaRail()
                 previousPage.zoomOut(animated: false)
                 previousPage.stopAnyVideo()
                 updateFooterBarButtonItems(isPlayingVideo: false)
+            } else {
+                captionContainerView.pendingText = nil
             }
         }
     }
@@ -479,10 +574,10 @@ class MediaPageViewController: UIPageViewController, UIPageViewControllerDataSou
             let message = galleryItem.message
             let thread = message.thread(with: transaction)
             let conversationStyle = ConversationStyle(thread: thread)
-            fetchedItem = ConversationViewItem(interaction: message,
-                                               isGroupThread: thread.isGroupThread(),
-                                               transaction: transaction,
-                                               conversationStyle: conversationStyle)
+            fetchedItem = ConversationInteractionViewItem(interaction: message,
+                                                          isGroupThread: thread.isGroupThread(),
+                                                          transaction: transaction,
+                                                          conversationStyle: conversationStyle)
         }
 
         guard let viewItem = fetchedItem else {
@@ -510,7 +605,10 @@ class MediaPageViewController: UIPageViewController, UIPageViewControllerDataSou
             return
         }
 
-        mediaGalleryDataSource.dismissMediaDetailViewController(self, animated: isAnimated, completion: completion)
+        mediaGalleryDataSource.dismissMediaDetailViewController(self, animated: isAnimated) {
+            UIDevice.current.ows_setOrientation(.portrait)
+            completion?()
+        }
     }
 
     // MARK: MediaDetailViewControllerDelegate
@@ -522,7 +620,7 @@ class MediaPageViewController: UIPageViewController, UIPageViewControllerDataSou
         self.shouldHideToolbars = !self.shouldHideToolbars
     }
 
-    public func mediaDetailViewController(_ mediaDetailViewController: MediaDetailViewController, requestDelete conversationViewItem: ConversationViewItem) {
+    public func mediaDetailViewController(_ mediaDetailViewController: MediaDetailViewController, requestDelete attachment: TSAttachment) {
         guard let mediaGalleryDataSource = self.mediaGalleryDataSource else {
             owsFailDebug("mediaGalleryDataSource was unexpectedly nil")
             self.presentingViewController?.dismiss(animated: true)
@@ -530,15 +628,8 @@ class MediaPageViewController: UIPageViewController, UIPageViewControllerDataSou
             return
         }
 
-        guard let message = conversationViewItem.interaction as? TSMessage else {
-            owsFailDebug("unexpected interaction: \(type(of: conversationViewItem))")
-            self.presentingViewController?.dismiss(animated: true)
-
-            return
-        }
-
-        guard let galleryItem = self.mediaGalleryDataSource?.galleryItems.first(where: { $0.message == message }) else {
-            owsFailDebug("unexpected interaction: \(type(of: conversationViewItem))")
+        guard let galleryItem = self.mediaGalleryDataSource?.galleryItems.first(where: { $0.attachmentStream == attachment }) else {
+            owsFailDebug("galleryItem was unexpectedly nil")
             self.presentingViewController?.dismiss(animated: true)
 
             return
@@ -585,9 +676,9 @@ class MediaPageViewController: UIPageViewController, UIPageViewControllerDataSou
         return formatter
     }()
 
-    lazy private var headerNameLabel: UILabel = {
+    lazy private var portraitHeaderNameLabel: UILabel = {
         let label = UILabel()
-        label.textColor = Theme.navbarTitleColor
+        label.textColor = Theme.darkThemePrimaryColor
         label.font = UIFont.ows_regularFont(withSize: 17)
         label.textAlignment = .center
         label.adjustsFontSizeToFitWidth = true
@@ -596,15 +687,39 @@ class MediaPageViewController: UIPageViewController, UIPageViewControllerDataSou
         return label
     }()
 
-    lazy private var headerDateLabel: UILabel = {
+    lazy private var portraitHeaderDateLabel: UILabel = {
         let label = UILabel()
-        label.textColor = Theme.navbarTitleColor
+        label.textColor = Theme.darkThemePrimaryColor
         label.font = UIFont.ows_regularFont(withSize: 12)
         label.textAlignment = .center
         label.adjustsFontSizeToFitWidth = true
         label.minimumScaleFactor = 0.8
 
         return label
+    }()
+
+    private lazy var portraitHeaderView: UIView = {
+        let stackView = UIStackView()
+        stackView.axis = .vertical
+        stackView.alignment = .center
+        stackView.spacing = 0
+        stackView.distribution = .fillProportionally
+        stackView.addArrangedSubview(portraitHeaderNameLabel)
+        stackView.addArrangedSubview(portraitHeaderDateLabel)
+
+        let containerView = UIView()
+        containerView.layoutMargins = UIEdgeInsets(top: 2, left: 8, bottom: 4, right: 8)
+
+        containerView.addSubview(stackView)
+
+        stackView.autoPinEdge(toSuperviewMargin: .top, relation: .greaterThanOrEqual)
+        stackView.autoPinEdge(toSuperviewMargin: .trailing, relation: .greaterThanOrEqual)
+        stackView.autoPinEdge(toSuperviewMargin: .bottom, relation: .greaterThanOrEqual)
+        stackView.autoPinEdge(toSuperviewMargin: .leading, relation: .greaterThanOrEqual)
+        stackView.setContentHuggingHigh()
+        stackView.autoCenterInSuperview()
+
+        return containerView
     }()
 
     private func updateTitle() {
@@ -615,27 +730,94 @@ class MediaPageViewController: UIPageViewController, UIPageViewControllerDataSou
         updateTitle(item: currentItem)
     }
 
+    private func updateCaption(item: MediaGalleryItem) {
+        captionContainerView.currentText = item.captionForDisplay
+    }
+
     private func updateTitle(item: MediaGalleryItem) {
         let name = senderName(message: item.message)
-        headerNameLabel.text = name
+        portraitHeaderNameLabel.text = name
 
         // use sent date
         let date = Date(timeIntervalSince1970: Double(item.message.timestamp) / 1000)
         let formattedDate = dateFormatter.string(from: date)
-        headerDateLabel.text = formattedDate
+        portraitHeaderDateLabel.text = formattedDate
+
+        let landscapeHeaderFormat = NSLocalizedString("MEDIA_GALLERY_LANDSCAPE_TITLE_FORMAT", comment: "embeds {{sender name}} and {{sent datetime}}, e.g. 'Sarah on 10/30/18, 3:29'")
+        let landscapeHeaderText = String(format: landscapeHeaderFormat, name, formattedDate)
+        self.title = landscapeHeaderText
+        self.navigationItem.title = landscapeHeaderText
 
         if #available(iOS 11, *) {
-            // Do nothing, on iOS11, autolayout grows the stack view as necessary.
+            // Do nothing, on iOS11+, autolayout grows the stack view as necessary.
         } else {
             // Size the titleView to be large enough to fit the widest label,
             // but no larger. If we go for a "full width" label, our title view
             // will not be centered (since the left and right bar buttons have different widths)            
-            headerNameLabel.sizeToFit()
-            headerDateLabel.sizeToFit()
-            let maxWidth = max(headerNameLabel.frame.width, headerDateLabel.frame.width)
+            portraitHeaderNameLabel.sizeToFit()
+            portraitHeaderDateLabel.sizeToFit()
+            let width = max(portraitHeaderNameLabel.frame.width, portraitHeaderDateLabel.frame.width)
 
-            let headerFrame: CGRect = CGRect(x: 0, y: 0, width: maxWidth, height: 44)
-            headerView.frame = headerFrame
+            let headerFrame: CGRect = CGRect(x: 0, y: 0, width: width, height: 44)
+            portraitHeaderView.frame = headerFrame
         }
+    }
+}
+
+extension MediaGalleryItem: GalleryRailItem {
+    public var aspectRatio: CGFloat {
+        return self.imageSize.aspectRatio
+    }
+
+    public func getRailImage() -> Promise<UIImage> {
+        let (guarantee, fulfill) = Guarantee<UIImage>.pending()
+        if let image = self.thumbnailImage(async: { fulfill($0) }) {
+            fulfill(image)
+        }
+
+        return Promise(guarantee)
+    }
+}
+
+extension MediaGalleryAlbum: GalleryRailItemProvider {
+    var railItems: [GalleryRailItem] {
+        return self.items
+    }
+}
+
+extension MediaPageViewController: GalleryRailViewDelegate {
+    func galleryRailView(_ galleryRailView: GalleryRailView, didTapItem imageRailItem: GalleryRailItem) {
+        guard let targetItem = imageRailItem as? MediaGalleryItem else {
+            owsFailDebug("unexpected imageRailItem: \(imageRailItem)")
+            return
+        }
+
+        let direction: UIPageViewControllerNavigationDirection
+        direction = currentItem.albumIndex < targetItem.albumIndex ? .forward : .reverse
+
+        self.setCurrentItem(targetItem, direction: direction, animated: true)
+    }
+}
+
+extension MediaPageViewController: CaptionContainerViewDelegate {
+
+    func captionContainerViewDidUpdateText(_ captionContainerView: CaptionContainerView) {
+        updateCaptionContainerVisibility()
+    }
+
+    // MARK: Helpers
+
+    func updateCaptionContainerVisibility() {
+        if let currentText = captionContainerView.currentText, currentText.count > 0 {
+            captionContainerView.isHidden = false
+            return
+        }
+
+        if let pendingText = captionContainerView.pendingText, pendingText.count > 0 {
+            captionContainerView.isHidden = false
+            return
+        }
+
+        captionContainerView.isHidden = true
     }
 }

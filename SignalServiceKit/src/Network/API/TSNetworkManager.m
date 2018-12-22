@@ -4,30 +4,41 @@
 
 #import "TSNetworkManager.h"
 #import "AppContext.h"
-#import "NSData+OWS.h"
 #import "NSError+messageSending.h"
 #import "NSURLSessionDataTask+StatusCode.h"
+#import "OWSError.h"
 #import "OWSSignalService.h"
 #import "SSKEnvironment.h"
 #import "TSAccountManager.h"
-#import "TSVerifyCodeRequest.h"
+#import "TSRequest.h"
 #import <AFNetworking/AFNetworking.h>
+#import <SignalCoreKit/NSData+OWS.h>
 #import <SignalServiceKit/SignalServiceKit-Swift.h>
 
-NSString *const TSNetworkManagerDomain = @"org.whispersystems.signal.networkManager";
+NSErrorDomain const TSNetworkManagerErrorDomain = @"SignalServiceKit.TSNetworkManager";
 
 BOOL IsNSErrorNetworkFailure(NSError *_Nullable error)
 {
-    return ([error.domain isEqualToString:TSNetworkManagerDomain] && error.code == 0);
+    return ([error.domain isEqualToString:TSNetworkManagerErrorDomain]
+        && error.code == TSNetworkManagerErrorFailedConnection);
 }
 
 @interface TSNetworkManager ()
+
+// This property should only be accessed on udSerialQueue.
+@property (atomic, readonly) AFHTTPSessionManager *udSessionManager;
+@property (atomic, readonly) NSDictionary *udSessionManagerDefaultHeaders;
+
+@property (atomic, readonly) dispatch_queue_t udSerialQueue;
 
 typedef void (^failureBlock)(NSURLSessionDataTask *task, NSError *error);
 
 @end
 
 @implementation TSNetworkManager
+
+@synthesize udSessionManager = _udSessionManager;
+@synthesize udSerialQueue = _udSerialQueue;
 
 #pragma mark Singleton implementation
 
@@ -44,6 +55,8 @@ typedef void (^failureBlock)(NSURLSessionDataTask *task, NSError *error);
     if (!self) {
         return self;
     }
+
+    _udSerialQueue = dispatch_queue_create("org.whispersystems.networkManager.udQueue", DISPATCH_QUEUE_SERIAL);
 
     OWSSingletonAssert();
 
@@ -68,9 +81,15 @@ typedef void (^failureBlock)(NSURLSessionDataTask *task, NSError *error);
     OWSAssertDebug(successBlock);
     OWSAssertDebug(failureBlock);
 
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        [self makeRequestSync:request completionQueue:completionQueue success:successBlock failure:failureBlock];
-    });
+    if (request.isUDRequest) {
+        dispatch_async(self.udSerialQueue, ^{
+            [self makeUDRequestSync:request success:successBlock failure:failureBlock];
+        });
+    } else {
+        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+            [self makeRequestSync:request completionQueue:completionQueue success:successBlock failure:failureBlock];
+        });
+    }
 }
 
 - (void)makeRequestSync:(TSRequest *)request
@@ -82,11 +101,11 @@ typedef void (^failureBlock)(NSURLSessionDataTask *task, NSError *error);
     OWSAssertDebug(successBlock);
     OWSAssertDebug(failureBlock);
 
-    OWSLogInfo(@"Making request: %@", request);
+    OWSLogInfo(@"Making Non-UD request: %@", request);
 
     // TODO: Remove this logging when the call connection issues have been resolved.
     TSNetworkManagerSuccess success = ^(NSURLSessionDataTask *task, _Nullable id responseObject) {
-        OWSLogInfo(@"request succeeded : %@", request);
+        OWSLogInfo(@"Non-UD request succeeded : %@", request);
 
         if (request.shouldHaveAuthorizationHeaders) {
             [TSAccountManager.sharedInstance setIsDeregistered:NO];
@@ -103,45 +122,106 @@ typedef void (^failureBlock)(NSURLSessionDataTask *task, NSError *error);
     // session manager, so its safe to reconfigure it here.
     sessionManager.completionQueue = completionQueue;
 
-    if ([request isKindOfClass:[TSVerifyCodeRequest class]]) {
-        // We plant the Authorization parameter ourselves, no need to double add.
-        [sessionManager.requestSerializer
-            setAuthorizationHeaderFieldWithUsername:((TSVerifyCodeRequest *)request).numberToValidate
-                                           password:[request.parameters objectForKey:@"AuthKey"]];
-        NSMutableDictionary *parameters = [request.parameters mutableCopy];
-        [parameters removeObjectForKey:@"AuthKey"];
-        [sessionManager PUT:request.URL.absoluteString parameters:parameters success:success failure:failure];
-    } else {
-        if (request.shouldHaveAuthorizationHeaders) {
-            [sessionManager.requestSerializer setAuthorizationHeaderFieldWithUsername:request.authUsername
-                                                                             password:request.authPassword];
-        }
+    if (request.shouldHaveAuthorizationHeaders) {
+        [sessionManager.requestSerializer setAuthorizationHeaderFieldWithUsername:request.authUsername
+                                                                         password:request.authPassword];
+    }
 
-        if ([request.HTTPMethod isEqualToString:@"GET"]) {
-            [sessionManager GET:request.URL.absoluteString
-                     parameters:request.parameters
-                       progress:nil
-                        success:success
-                        failure:failure];
-        } else if ([request.HTTPMethod isEqualToString:@"POST"]) {
-            [sessionManager POST:request.URL.absoluteString
-                      parameters:request.parameters
-                        progress:nil
-                         success:success
-                         failure:failure];
-        } else if ([request.HTTPMethod isEqualToString:@"PUT"]) {
-            [sessionManager PUT:request.URL.absoluteString
-                     parameters:request.parameters
-                        success:success
-                        failure:failure];
-        } else if ([request.HTTPMethod isEqualToString:@"DELETE"]) {
-            [sessionManager DELETE:request.URL.absoluteString
-                        parameters:request.parameters
-                           success:success
-                           failure:failure];
-        } else {
-            OWSLogError(@"Trying to perform HTTP operation with unknown verb: %@", request.HTTPMethod);
-        }
+    // Honor the request's headers.
+    for (NSString *headerField in request.allHTTPHeaderFields) {
+        NSString *headerValue = request.allHTTPHeaderFields[headerField];
+        [sessionManager.requestSerializer setValue:headerValue forHTTPHeaderField:headerField];
+    }
+
+    [self performRequest:request sessionManager:sessionManager success:success failure:failure];
+}
+
+// This method should only be invoked on udSerialQueue.
+- (AFHTTPSessionManager *)udSessionManager
+{
+    if (!_udSessionManager) {
+        AFHTTPSessionManager *udSessionManager = [OWSSignalService sharedInstance].signalServiceSessionManager;
+        udSessionManager.completionQueue = dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0);
+        // NOTE: We could enable HTTPShouldUsePipelining here.
+        _udSessionManager = udSessionManager;
+        // Make a copy of the default headers for this session manager.
+        _udSessionManagerDefaultHeaders = [udSessionManager.requestSerializer.HTTPRequestHeaders copy];
+    }
+
+    return _udSessionManager;
+}
+
+- (void)makeUDRequestSync:(TSRequest *)request
+                  success:(TSNetworkManagerSuccess)successBlock
+                  failure:(TSNetworkManagerFailure)failureBlock
+{
+    OWSAssertDebug(request);
+    OWSAssert(!request.shouldHaveAuthorizationHeaders);
+    OWSAssertDebug(successBlock);
+    OWSAssertDebug(failureBlock);
+
+    OWSLogInfo(@"Making UD request: %@", request);
+
+    TSNetworkManagerSuccess success = ^(NSURLSessionDataTask *task, _Nullable id responseObject) {
+        OWSLogInfo(@"UD request succeeded : %@", request);
+
+        successBlock(task, responseObject);
+
+        [OutageDetection.sharedManager reportConnectionSuccess];
+    };
+    TSNetworkManagerFailure failure = [TSNetworkManager errorPrettifyingForFailureBlock:failureBlock request:request];
+
+    AFHTTPSessionManager *sessionManager = self.udSessionManager;
+
+    // Clear all headers so that we don't retain headers from previous requests.
+    for (NSString *headerField in sessionManager.requestSerializer.HTTPRequestHeaders.allKeys.copy) {
+        [sessionManager.requestSerializer setValue:nil forHTTPHeaderField:headerField];
+    }
+    // Apply the default headers for this session manager.
+    for (NSString *headerField in self.udSessionManagerDefaultHeaders) {
+        NSString *headerValue = self.udSessionManagerDefaultHeaders[headerField];
+        [sessionManager.requestSerializer setValue:headerValue forHTTPHeaderField:headerField];
+    }
+    // Honor the request's headers.
+    for (NSString *headerField in request.allHTTPHeaderFields) {
+        NSString *headerValue = request.allHTTPHeaderFields[headerField];
+        [sessionManager.requestSerializer setValue:headerValue forHTTPHeaderField:headerField];
+    }
+
+    [self performRequest:request sessionManager:sessionManager success:success failure:failure];
+}
+
+- (void)performRequest:(TSRequest *)request
+        sessionManager:(AFHTTPSessionManager *)sessionManager
+               success:(TSNetworkManagerSuccess)success
+               failure:(TSNetworkManagerFailure)failure
+{
+    OWSAssertDebug(request);
+    OWSAssertDebug(sessionManager);
+    OWSAssertDebug(success);
+    OWSAssertDebug(failure);
+
+    if ([request.HTTPMethod isEqualToString:@"GET"]) {
+        [sessionManager GET:request.URL.absoluteString
+                 parameters:request.parameters
+                   progress:nil
+                    success:success
+                    failure:failure];
+    } else if ([request.HTTPMethod isEqualToString:@"POST"]) {
+        [sessionManager POST:request.URL.absoluteString
+                  parameters:request.parameters
+                    progress:nil
+                     success:success
+                     failure:failure];
+    } else if ([request.HTTPMethod isEqualToString:@"PUT"]) {
+        [sessionManager PUT:request.URL.absoluteString parameters:request.parameters success:success failure:failure];
+    } else if ([request.HTTPMethod isEqualToString:@"DELETE"]) {
+        [sessionManager DELETE:request.URL.absoluteString
+                    parameters:request.parameters
+                       success:success
+                       failure:failure];
+    } else {
+        OWSLogError(@"Trying to perform HTTP operation with unknown verb: %@", request.HTTPMethod);
     }
 }
 
@@ -178,6 +258,7 @@ typedef void (^failureBlock)(NSURLSessionDataTask *task, NSError *error);
         [curlComponents addObject:@"--data-ascii"];
         [curlComponents addObject:[NSString stringWithFormat:@"'%@'", jsonBody]];
     }
+    // TODO: Add support for cookies.
     [curlComponents addObject:task.originalRequest.URL.absoluteString];
     NSString *curlCommand = [curlComponents componentsJoinedByString:@" "];
     OWSLogVerbose(@"curl for failed request: %@", curlCommand);
@@ -193,7 +274,7 @@ typedef void (^failureBlock)(NSURLSessionDataTask *task, NSError *error);
       NSInteger statusCode = [task statusCode];
 
 #ifdef DEBUG
-        [TSNetworkManager logCurlForTask:task];
+      [TSNetworkManager logCurlForTask:task];
 #endif
 
       [OutageDetection.sharedManager reportConnectionFailure];
@@ -206,16 +287,17 @@ typedef void (^failureBlock)(NSURLSessionDataTask *task, NSError *error);
 
       switch (statusCode) {
           case 0: {
-              error.isRetryable = YES;
-
-              OWSLogWarn(@"The network request failed because of a connectivity error: %@", request);
-              failureBlock(task,
-                  [self errorWithHTTPCode:statusCode
+              NSError *connectivityError =
+                  [self errorWithHTTPCode:TSNetworkManagerErrorFailedConnection
                               description:NSLocalizedString(@"ERROR_DESCRIPTION_NO_INTERNET",
                                               @"Generic error used whenever Signal can't contact the server")
                             failureReason:networkError.localizedFailureReason
                        recoverySuggestion:NSLocalizedString(@"NETWORK_ERROR_RECOVERY", nil)
-                            fallbackError:networkError]);
+                            fallbackError:networkError];
+              connectivityError.isRetryable = YES;
+
+              OWSLogWarn(@"The network request failed because of a connectivity error: %@", request);
+              failureBlock(task, connectivityError);
               break;
           }
           case 400: {
@@ -223,10 +305,6 @@ typedef void (^failureBlock)(NSURLSessionDataTask *task, NSError *error);
                   @"The request contains an invalid parameter : %@, %@", networkError.debugDescription, request);
 
               error.isRetryable = NO;
-
-              // TODO distinguish CDS requests. we don't want a bad CDS request to trigger "Signal deauth" logic.
-              // also, shouldn't this be under 403, not 400?
-              [TSAccountManager.sharedInstance setIsDeregistered:YES];
 
               failureBlock(task, error);
               break;
@@ -236,6 +314,7 @@ typedef void (^failureBlock)(NSURLSessionDataTask *task, NSError *error);
                   networkError.debugDescription,
                   request);
               error.isRetryable = NO;
+              [self deregisterAfterAuthErrorIfNecessary:task request:request statusCode:statusCode];
               failureBlock(task, error);
               break;
           }
@@ -243,6 +322,7 @@ typedef void (^failureBlock)(NSURLSessionDataTask *task, NSError *error);
               OWSLogError(
                   @"The server returned an authentication failure: %@, %@", networkError.debugDescription, request);
               error.isRetryable = NO;
+              [self deregisterAfterAuthErrorIfNecessary:task request:request statusCode:statusCode];
               failureBlock(task, error);
               break;
           }
@@ -255,44 +335,52 @@ typedef void (^failureBlock)(NSURLSessionDataTask *task, NSError *error);
           case 411: {
               OWSLogInfo(
                   @"Multi-device pairing: %ld, %@, %@", (long)statusCode, networkError.debugDescription, request);
-              failureBlock(task,
-                           [self errorWithHTTPCode:statusCode
-                                       description:NSLocalizedString(@"MULTIDEVICE_PAIRING_MAX_DESC", @"alert title: cannot link - reached max linked devices")
-                                     failureReason:networkError.localizedFailureReason
-                                recoverySuggestion:NSLocalizedString(@"MULTIDEVICE_PAIRING_MAX_RECOVERY", @"alert body: cannot link - reached max linked devices")
-                                     fallbackError:networkError]);
+              NSError *customError =
+                  [self errorWithHTTPCode:statusCode
+                              description:NSLocalizedString(@"MULTIDEVICE_PAIRING_MAX_DESC",
+                                              @"alert title: cannot link - reached max linked devices")
+                            failureReason:networkError.localizedFailureReason
+                       recoverySuggestion:NSLocalizedString(@"MULTIDEVICE_PAIRING_MAX_RECOVERY",
+                                              @"alert body: cannot link - reached max linked devices")
+                            fallbackError:networkError];
+              customError.isRetryable = NO;
+              failureBlock(task, customError);
               break;
           }
           case 413: {
               OWSLogWarn(@"Rate limit exceeded: %@", request);
-              failureBlock(task,
-                           [self errorWithHTTPCode:statusCode
-                                       description:NSLocalizedString(@"REGISTRATION_ERROR", nil)
-                                     failureReason:networkError.localizedFailureReason
-                                recoverySuggestion:NSLocalizedString(@"REGISTER_RATE_LIMITING_BODY", nil)
-                                     fallbackError:networkError]);
+              NSError *customError = [self errorWithHTTPCode:statusCode
+                                                 description:NSLocalizedString(@"REGISTER_RATE_LIMITING_ERROR", nil)
+                                               failureReason:networkError.localizedFailureReason
+                                          recoverySuggestion:NSLocalizedString(@"REGISTER_RATE_LIMITING_BODY", nil)
+                                               fallbackError:networkError];
+              customError.isRetryable = NO;
+              failureBlock(task, customError);
               break;
           }
           case 417: {
               // TODO: Is this response code obsolete?
               OWSLogWarn(@"The number is already registered on a relay. Please unregister there first: %@", request);
-              failureBlock(task,
-                           [self errorWithHTTPCode:statusCode
-                                       description:NSLocalizedString(@"REGISTRATION_ERROR", nil)
-                                     failureReason:networkError.localizedFailureReason
-                                recoverySuggestion:NSLocalizedString(@"RELAY_REGISTERED_ERROR_RECOVERY", nil)
-                                     fallbackError:networkError]);
+              NSError *customError = [self errorWithHTTPCode:statusCode
+                                                 description:NSLocalizedString(@"REGISTRATION_ERROR", nil)
+                                               failureReason:networkError.localizedFailureReason
+                                          recoverySuggestion:NSLocalizedString(@"RELAY_REGISTERED_ERROR_RECOVERY", nil)
+                                               fallbackError:networkError];
+              customError.isRetryable = NO;
+              failureBlock(task, customError);
               break;
           }
           case 422: {
               OWSLogError(@"The registration was requested over an unknown transport: %@, %@",
                   networkError.debugDescription,
                   request);
+              error.isRetryable = NO;
               failureBlock(task, error);
               break;
           }
           default: {
               OWSLogWarn(@"Unknown error: %ld, %@, %@", (long)statusCode, networkError.debugDescription, request);
+              error.isRetryable = NO;
               failureBlock(task, error);
               break;
           }
@@ -300,11 +388,38 @@ typedef void (^failureBlock)(NSURLSessionDataTask *task, NSError *error);
     };
 }
 
++ (void)deregisterAfterAuthErrorIfNecessary:(NSURLSessionDataTask *)task
+                                    request:(TSRequest *)request
+                                 statusCode:(NSInteger)statusCode {
+    OWSLogVerbose(@"Invalid auth: %@", task.originalRequest.allHTTPHeaderFields);
+
+    // We only want to de-register for:
+    //
+    // * Auth errors...
+    // * ...received from Signal service...
+    // * ...that used standard authorization.
+    //
+    // * We don't want want to deregister for:
+    //
+    // * CDS requests.
+    // * Requests using UD auth.
+    // * etc.
+    if ([task.originalRequest.URL.absoluteString hasPrefix:textSecureServerURL]
+        && request.shouldHaveAuthorizationHeaders) {
+        [TSAccountManager.sharedInstance setIsDeregistered:YES];
+    } else {
+        OWSLogWarn(@"Ignoring %d for URL: %@", (int)statusCode, task.originalRequest.URL.absoluteString);
+    }
+}
+
 + (NSError *)errorWithHTTPCode:(NSInteger)code
                    description:(NSString *)description
                  failureReason:(NSString *)failureReason
             recoverySuggestion:(NSString *)recoverySuggestion
-                 fallbackError:(NSError *_Nonnull)fallbackError {
+                 fallbackError:(NSError *)fallbackError
+{
+    OWSAssertDebug(fallbackError);
+
     if (!description) {
         description = fallbackError.localizedDescription;
     }
@@ -333,7 +448,9 @@ typedef void (^failureBlock)(NSURLSessionDataTask *task, NSError *error);
         [dict setObject:failureData forKey:AFNetworkingOperationFailingURLResponseDataErrorKey];
     }
 
-    return [NSError errorWithDomain:TSNetworkManagerDomain code:code userInfo:dict];
+    dict[NSUnderlyingErrorKey] = fallbackError;
+
+    return [NSError errorWithDomain:TSNetworkManagerErrorDomain code:code userInfo:dict];
 }
 
 @end

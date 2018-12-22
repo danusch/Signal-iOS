@@ -13,8 +13,13 @@ import SignalMessaging
 class CallViewController: OWSViewController, CallObserver, CallServiceObserver, CallAudioServiceDelegate {
 
     // Dependencies
+
     var callUIAdapter: CallUIAdapter {
-        return SignalApp.shared().callUIAdapter
+        return AppEnvironment.shared.callService.callUIAdapter
+    }
+
+    var proximityMonitoringManager: OWSProximityMonitoringManager {
+        return Environment.shared.proximityMonitoringManager
     }
 
     // Feature Flag
@@ -152,6 +157,7 @@ class CallViewController: OWSViewController, CallObserver, CallServiceObserver, 
 
     deinit {
         NotificationCenter.default.removeObserver(self)
+        self.proximityMonitoringManager.remove(lifetime: self)
     }
 
     @objc func didBecomeActive() {
@@ -165,15 +171,14 @@ class CallViewController: OWSViewController, CallObserver, CallServiceObserver, 
     override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
 
-        UIDevice.current.isProximityMonitoringEnabled = false
-
         callDurationTimer?.invalidate()
         callDurationTimer = nil
     }
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
-        UIDevice.current.isProximityMonitoringEnabled = true
+        self.proximityMonitoringManager.add(lifetime: self)
+
         updateCallUI(callState: call.state)
 
         self.becomeFirstResponder()
@@ -208,7 +213,7 @@ class CallViewController: OWSViewController, CallObserver, CallServiceObserver, 
         // Subscribe for future call updates
         call.addObserverAndSyncState(observer: self)
 
-        SignalApp.shared().callService.addObserverAndSyncState(observer: self)
+        AppEnvironment.shared.callService.addObserverAndSyncState(observer: self)
 
         assert(callUIAdapter.audioService.delegate == nil)
         callUIAdapter.audioService.delegate = self
@@ -395,7 +400,7 @@ class CallViewController: OWSViewController, CallObserver, CallServiceObserver, 
         videoModeFlipCameraButton = createButton(image: #imageLiteral(resourceName: "video-switch-camera-unselected"),
                                                  action: #selector(didPressFlipCamera))
 
-        videoModeFlipCameraButton.accessibilityLabel = NSLocalizedString("CALL_VIEW_SWITCH_CAMERA_DIRECTION", comment: "Accessibility label to toggle front vs. rear facing camera")
+        videoModeFlipCameraButton.accessibilityLabel = NSLocalizedString("CALL_VIEW_SWITCH_CAMERA_DIRECTION", comment: "Accessibility label to toggle front- vs. rear-facing camera")
         videoModeFlipCameraButton.alpha = 0.9
 
         videoModeVideoButton = createButton(image: #imageLiteral(resourceName: "video-video-unselected"),
@@ -449,7 +454,7 @@ class CallViewController: OWSViewController, CallObserver, CallServiceObserver, 
     }
 
     func updateAvatarImage() {
-        contactAvatarView.image = OWSAvatarBuilder.buildImage(thread: thread, diameter: 400, contactsManager: contactsManager)
+        contactAvatarView.image = OWSAvatarBuilder.buildImage(thread: thread, diameter: 400)
     }
 
     func createIncomingCallControls() {

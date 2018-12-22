@@ -4,6 +4,7 @@
 
 #import "OWSTableViewController.h"
 #import "OWSNavigationController.h"
+#import "Theme.h"
 #import "UIColor+OWS.h"
 #import "UIFont+OWS.h"
 #import "UIView+OWS.h"
@@ -342,6 +343,26 @@ const CGFloat kOWSTable_DefaultCellHeight = 45.f;
         cell.userInteractionEnabled = NO;
         return cell;
     };
+    return item;
+}
+
++ (OWSTableItem *)longDisclosureItemWithText:(NSString *)text actionBlock:(nullable OWSTableActionBlock)actionBlock
+{
+    OWSAssertDebug(text.length > 0);
+
+    OWSTableItem *item = [OWSTableItem new];
+    item.customCellBlock = ^{
+        UITableViewCell *cell = [OWSTableItem newCell];
+
+        cell.textLabel.text = text;
+        cell.textLabel.numberOfLines = 0;
+        cell.textLabel.lineBreakMode = NSLineBreakByWordWrapping;
+        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+
+        return cell;
+    };
+    item.customRowHeight = @(UITableViewAutomaticDimension);
+    item.actionBlock = actionBlock;
     return item;
 }
 

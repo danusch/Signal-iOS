@@ -10,6 +10,14 @@ public extension String {
         return self.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    func rtlSafeAppend(_ string: String) -> String {
+        return (self as NSString).rtlSafeAppend(string)
+    }
+
+    var filterForDisplay: String? {
+        return (self as NSString).filterStringForDisplay()
+    }
+
     // Truncates string to be less than or equal to byteCount, while ensuring we never truncate partial characters for multibyte characters.
     func truncated(toByteCount byteCount: UInt) -> String? {
         var lowerBoundCharCount = 0

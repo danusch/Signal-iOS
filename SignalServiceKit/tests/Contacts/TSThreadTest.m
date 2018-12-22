@@ -4,7 +4,7 @@
 
 #import "OWSDevice.h"
 #import "OWSPrimaryStorage.h"
-#import "SSKBaseTest.h"
+#import "SSKBaseTestObjC.h"
 #import "TSAttachmentStream.h"
 #import "TSContactThread.h"
 #import "TSIncomingMessage.h"
@@ -12,7 +12,7 @@
 #import "TestAppContext.h"
 #import <SignalServiceKit/SignalServiceKit-Swift.h>
 
-@interface TSThreadTest : SSKBaseTest
+@interface TSThreadTest : SSKBaseTestObjC
 
 @end
 
@@ -48,7 +48,9 @@
                                                       attachmentIds:@[]
                                                    expiresInSeconds:0
                                                       quotedMessage:nil
-                                                       contactShare:nil];
+                                                       contactShare:nil
+                                                    serverTimestamp:nil
+                                                    wasReceivedByUD:NO];
     [incomingMessage save];
 
     TSOutgoingMessage *outgoingMessage =
@@ -80,11 +82,8 @@
     // Sanity check
     XCTAssertEqual(0, [thread numberOfInteractions]);
 
-    NSError *error;
     TSAttachmentStream *incomingAttachment =
-        [[TSAttachmentStream alloc] initWithContentType:@"image/jpeg" byteCount:0 sourceFilename:nil];
-    [incomingAttachment writeData:[NSData new] error:&error];
-    [incomingAttachment save];
+        [AttachmentStreamFactory createWithContentType:@"image/jpeg" dataSource:DataSourceValue.emptyDataSource];
 
     // Sanity check
     BOOL incomingFileWasCreated =
@@ -100,13 +99,13 @@
                                                       attachmentIds:@[ incomingAttachment.uniqueId ]
                                                    expiresInSeconds:0
                                                       quotedMessage:nil
-                                                       contactShare:nil];
+                                                       contactShare:nil
+                                                    serverTimestamp:nil
+                                                    wasReceivedByUD:NO];
     [incomingMessage save];
 
     TSAttachmentStream *outgoingAttachment =
-        [[TSAttachmentStream alloc] initWithContentType:@"image/jpeg" byteCount:0 sourceFilename:nil];
-    [outgoingAttachment writeData:[NSData new] error:&error];
-    [outgoingAttachment save];
+        [AttachmentStreamFactory createWithContentType:@"image/jpeg" dataSource:DataSourceValue.emptyDataSource];
 
     // Sanity check
     BOOL outgoingFileWasCreated =

@@ -8,7 +8,8 @@
 #import "OWSNavigationController.h"
 #import "Signal-Swift.h"
 #import "SignalApp.h"
-#import <Curve25519Kit/Randomness.h>
+#import <SignalCoreKit/NSDate+OWS.h>
+#import <SignalCoreKit/Randomness.h>
 #import <SignalMessaging/BlockListUIUtils.h>
 #import <SignalMessaging/ContactTableViewCell.h>
 #import <SignalMessaging/ContactsViewHelper.h>
@@ -20,7 +21,6 @@
 #import <SignalMessaging/UIUtil.h>
 #import <SignalMessaging/UIView+OWS.h>
 #import <SignalMessaging/UIViewController+OWS.h>
-#import <SignalServiceKit/NSDate+OWS.h>
 #import <SignalServiceKit/OWSMessageSender.h>
 #import <SignalServiceKit/SignalAccount.h>
 #import <SignalServiceKit/TSGroupModel.h>
@@ -28,8 +28,6 @@
 #import <SignalServiceKit/TSOutgoingMessage.h>
 
 NS_ASSUME_NONNULL_BEGIN
-
-const NSUInteger kNewGroupViewControllerAvatarWidth = 68;
 
 @interface NewGroupViewController () <UIImagePickerControllerDelegate,
     UITextFieldDelegate,
@@ -47,6 +45,8 @@ const NSUInteger kNewGroupViewControllerAvatarWidth = 68;
 @property (nonatomic, readonly) OWSTableViewController *tableViewController;
 @property (nonatomic, readonly) AvatarImageView *avatarView;
 @property (nonatomic, readonly) UITextField *groupNameTextField;
+
+@property (nonatomic, readonly) NSData *groupId;
 
 @property (nonatomic, nullable) UIImage *groupAvatar;
 @property (nonatomic) NSMutableSet<NSString *> *memberRecipientIds;
@@ -86,6 +86,8 @@ const NSUInteger kNewGroupViewControllerAvatarWidth = 68;
 
 - (void)commonInit
 {
+    _groupId = [Randomness generateRandomBytes:kGroupIdLength];
+
     _messageSender = SSKEnvironment.shared.messageSender;
     _contactsViewHelper = [[ContactsViewHelper alloc] initWithDelegate:self];
     _avatarViewHelper = [AvatarViewHelper new];
@@ -151,8 +153,8 @@ const NSUInteger kNewGroupViewControllerAvatarWidth = 68;
     [threadInfoView addSubview:avatarView];
     [avatarView autoVCenterInSuperview];
     [avatarView autoPinLeadingToSuperviewMargin];
-    [avatarView autoSetDimension:ALDimensionWidth toSize:kNewGroupViewControllerAvatarWidth];
-    [avatarView autoSetDimension:ALDimensionHeight toSize:kNewGroupViewControllerAvatarWidth];
+    [avatarView autoSetDimension:ALDimensionWidth toSize:kLargeAvatarSize];
+    [avatarView autoSetDimension:ALDimensionHeight toSize:kLargeAvatarSize];
     [self updateAvatarView];
 
     UITextField *groupNameTextField = [OWSTextField new];
@@ -241,8 +243,7 @@ const NSUInteger kNewGroupViewControllerAvatarWidth = 68;
                                     cell.accessoryMessage = NSLocalizedString(
                                         @"CONTACT_CELL_IS_BLOCKED", @"An indicator that a contact has been blocked.");
                                 }
-                                [cell configureWithRecipientId:recipientId
-                                               contactsManager:contactsViewHelper.contactsManager];
+                                [cell configureWithRecipientId:recipientId];
                                 return cell;
                             }
                             customRowHeight:UITableViewAutomaticDimension
@@ -330,8 +331,7 @@ const NSUInteger kNewGroupViewControllerAvatarWidth = 68;
                                         @"CONTACT_CELL_IS_BLOCKED", @"An indicator that a contact has been blocked.");
                                 }
 
-                                [cell configureWithRecipientId:signalAccount.recipientId
-                                               contactsManager:contactsViewHelper.contactsManager];
+                                [cell configureWithRecipientId:signalAccount.recipientId];
                                 return cell;
                             }
                             customRowHeight:UITableViewAutomaticDimension
@@ -488,13 +488,17 @@ const NSUInteger kNewGroupViewControllerAvatarWidth = 68;
                               NSData *data = UIImagePNGRepresentation(model.groupImage);
                               DataSource *_Nullable dataSource =
                                   [DataSourceValue dataSourceWithData:data fileExtension:@"png"];
-                              [self.messageSender enqueueTemporaryAttachment:dataSource
-                                                                 contentType:OWSMimeTypeImagePng
-                                                                   inMessage:message
-                                                                     success:successHandler
-                                                                     failure:failureHandler];
+                              // CLEANUP DURABLE - Replace with a durable operation e.g. `GroupCreateJob`, which creates
+                              // an error in the thread if group creation fails
+                              [self.messageSender sendTemporaryAttachment:dataSource
+                                                              contentType:OWSMimeTypeImagePng
+                                                                inMessage:message
+                                                                  success:successHandler
+                                                                  failure:failureHandler];
                           } else {
-                              [self.messageSender enqueueMessage:message success:successHandler failure:failureHandler];
+                              // CLEANUP DURABLE - Replace with a durable operation e.g. `GroupCreateJob`, which creates
+                              // an error in the thread if group creation fails
+                              [self.messageSender sendMessage:message success:successHandler failure:failureHandler];
                           }
                       });
                   }];
@@ -505,8 +509,10 @@ const NSUInteger kNewGroupViewControllerAvatarWidth = 68;
     NSString *groupName = [self.groupNameTextField.text ows_stripped];
     NSMutableArray<NSString *> *recipientIds = [self.memberRecipientIds.allObjects mutableCopy];
     [recipientIds addObject:[self.contactsViewHelper localNumber]];
-    NSData *groupId = [Randomness generateRandomBytes:16];
-    return [[TSGroupModel alloc] initWithTitle:groupName memberIds:recipientIds image:self.groupAvatar groupId:groupId];
+    return [[TSGroupModel alloc] initWithTitle:groupName
+                                     memberIds:recipientIds
+                                         image:self.groupAvatar
+                                       groupId:self.groupId];
 }
 
 #pragma mark - Group Avatar
@@ -529,7 +535,14 @@ const NSUInteger kNewGroupViewControllerAvatarWidth = 68;
 
 - (void)updateAvatarView
 {
-    self.avatarView.image = (self.groupAvatar ?: [UIImage imageNamed:@"empty-group-avatar"]);
+    UIImage *_Nullable groupAvatar = self.groupAvatar;
+    if (!groupAvatar) {
+        NSString *conversationColorName = [TSGroupThread defaultConversationColorNameForGroupId:self.groupId];
+        groupAvatar = [OWSGroupAvatarBuilder defaultAvatarForGroupId:self.groupId
+                                               conversationColorName:conversationColorName
+                                                            diameter:kLargeAvatarSize];
+    }
+    self.avatarView.image = groupAvatar;
 }
 
 #pragma mark - Event Handling

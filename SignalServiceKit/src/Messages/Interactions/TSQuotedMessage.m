@@ -188,7 +188,7 @@ NS_ASSUME_NONNULL_BEGIN
 
             SSKProtoAttachmentPointer *thumbnailAttachmentProto = quotedAttachment.thumbnail;
             TSAttachmentPointer *_Nullable thumbnailPointer =
-                [TSAttachmentPointer attachmentPointerFromProto:thumbnailAttachmentProto];
+                [TSAttachmentPointer attachmentPointerFromProto:thumbnailAttachmentProto albumMessage:nil];
             if (thumbnailPointer) {
                 [thumbnailPointer saveWithTransaction:transaction];
 
@@ -236,7 +236,7 @@ NS_ASSUME_NONNULL_BEGIN
 
                                if ([interaction isKindOfClass:[TSIncomingMessage class]]) {
                                    TSIncomingMessage *incomingMessage = (TSIncomingMessage *)interaction;
-                                   return [authorId isEqual:incomingMessage.messageAuthorId];
+                                   return [authorId isEqual:incomingMessage.authorId];
                                } else if ([interaction isKindOfClass:[TSOutgoingMessage class]]) {
                                    return [authorId isEqual:[TSAccountManager localNumber]];
                                } else {
@@ -253,7 +253,8 @@ NS_ASSUME_NONNULL_BEGIN
         return nil;
     }
 
-    TSAttachment *attachment = [quotedMessage attachmentWithTransaction:transaction];
+    // We quote _the first_ attachment, if any.
+    TSAttachment *_Nullable attachment = [quotedMessage attachmentsWithTransaction:transaction].firstObject;
     if (![attachment isKindOfClass:[TSAttachmentStream class]]) {
         return nil;
     }

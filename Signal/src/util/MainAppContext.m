@@ -4,11 +4,11 @@
 
 #import "MainAppContext.h"
 #import "Signal-Swift.h"
+#import <SignalCoreKit/Threading.h>
 #import <SignalMessaging/Environment.h>
 #import <SignalMessaging/OWSProfileManager.h>
 #import <SignalMessaging/SignalMessaging-Swift.h>
 #import <SignalServiceKit/OWSIdentityManager.h>
-#import <SignalServiceKit/Threading.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -220,16 +220,6 @@ NS_ASSUME_NONNULL_BEGIN
                                   }];
 }
 
-- (void)doMultiDeviceUpdateWithProfileKey:(OWSAES256Key *)profileKey
-{
-    OWSAssertDebug(profileKey);
-
-    [MultiDeviceProfileKeyUpdateJob runWithProfileKey:profileKey
-                                      identityManager:OWSIdentityManager.sharedManager
-                                        messageSender:SSKEnvironment.shared.messageSender
-                                       profileManager:OWSProfileManager.sharedManager];
-}
-
 - (BOOL)isRunningTests
 {
     return getenv("runningTests_dontStartApp");
@@ -301,6 +291,11 @@ NS_ASSUME_NONNULL_BEGIN
     NSURL *groupContainerDirectoryURL =
         [[NSFileManager defaultManager] containerURLForSecurityApplicationGroupIdentifier:SignalApplicationGroup];
     return [groupContainerDirectoryURL path];
+}
+
+- (NSUserDefaults *)appUserDefaults
+{
+    return [[NSUserDefaults alloc] initWithSuiteName:SignalApplicationGroup];
 }
 
 @end

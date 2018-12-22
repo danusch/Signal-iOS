@@ -85,7 +85,7 @@
         [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemStop
                                                       target:self
                                                       action:@selector(dismissWasPressed:)];
-
+    [self updateRightBarButtonForTheme];
     [self observeNotifications];
 
     self.title = NSLocalizedString(@"SETTINGS_NAV_BAR_TITLE", @"Title for settings activity");
@@ -148,16 +148,16 @@
                                          @"Error indicating that this device is no longer registered.");
                                      accessoryLabel.textColor = [UIColor ows_redColor];
                                  } else {
-                                     switch ([TSSocketManager sharedManager].state) {
-                                         case SocketManagerStateClosed:
+                                     switch (TSSocketManager.shared.highestSocketState) {
+                                         case OWSWebSocketStateClosed:
                                              accessoryLabel.text = NSLocalizedString(@"NETWORK_STATUS_OFFLINE", @"");
                                              accessoryLabel.textColor = [UIColor ows_redColor];
                                              break;
-                                         case SocketManagerStateConnecting:
+                                         case OWSWebSocketStateConnecting:
                                              accessoryLabel.text = NSLocalizedString(@"NETWORK_STATUS_CONNECTING", @"");
                                              accessoryLabel.textColor = [UIColor ows_yellowColor];
                                              break;
-                                         case SocketManagerStateOpen:
+                                         case OWSWebSocketStateOpen:
                                              accessoryLabel.text = NSLocalizedString(@"NETWORK_STATUS_CONNECTED", @"");
                                              accessoryLabel.textColor = [UIColor ows_greenColor];
                                              break;
@@ -193,20 +193,8 @@
                                               actionBlock:^{
                                                   [weakSelf showAdvanced];
                                               }]];
-    // Show backup UI in debug builds OR if backup has already been enabled.
-    //
-    // NOTE: Backup format is not yet finalized and backups are not yet
-    //       properly encrypted, so these debug backups should only be
-    //       done on test devices and will not be usable if/when we ship
-    //       backup to production.
-    //
-    // TODO: Always show backup when we go to production.
     BOOL isBackupEnabled = [OWSBackup.sharedManager isBackupEnabled];
-    BOOL showBackup = isBackupEnabled;
-    SUPPRESS_DEADSTORE_WARNING(showBackup);
-#ifdef DEBUG
-    showBackup = YES;
-#endif
+    BOOL showBackup = (OWSBackup.isFeatureEnabled && isBackupEnabled);
     if (showBackup) {
         [section addItem:[OWSTableItem disclosureItemWithText:NSLocalizedString(@"SETTINGS_BACKUP",
                                                                   @"Label for the backup view in app settings.")
@@ -248,7 +236,8 @@
 
 - (OWSTableItem *)destructiveButtonItemWithTitle:(NSString *)title selector:(SEL)selector color:(UIColor *)color
 {
-    return [OWSTableItem
+    __weak AppSettingsViewController *weakSelf = self;
+   return [OWSTableItem
         itemWithCustomCellBlock:^{
             UITableViewCell *cell = [OWSTableItem newCell];
             cell.preservesSuperviewLayoutMargins = YES;
@@ -260,7 +249,7 @@
                                                               font:[OWSFlatButton fontForHeight:kButtonHeight]
                                                         titleColor:[UIColor whiteColor]
                                                    backgroundColor:color
-                                                            target:self
+                                                            target:weakSelf
                                                           selector:selector];
             [cell.contentView addSubview:button];
             [button autoSetDimension:ALDimensionHeight toSize:kButtonHeight];
@@ -280,23 +269,17 @@
     cell.contentView.preservesSuperviewLayoutMargins = YES;
     cell.selectionStyle = UITableViewCellSelectionStyleNone;
 
-    const NSUInteger kAvatarSize = 68;
-    // TODO: Replace this icon.
     UIImage *_Nullable localProfileAvatarImage = [OWSProfileManager.sharedManager localProfileAvatarImage];
     UIImage *avatarImage = (localProfileAvatarImage
-            ?: [[UIImage imageNamed:@"profile_avatar_default"]
-                   imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate]);
+            ?: [[[OWSContactAvatarBuilder alloc] initForLocalUserWithDiameter:kLargeAvatarSize] buildDefaultImage]);
     OWSAssertDebug(avatarImage);
 
     AvatarImageView *avatarView = [[AvatarImageView alloc] initWithImage:avatarImage];
-    if (!localProfileAvatarImage) {
-        avatarView.tintColor = Theme.middleGrayColor;
-    }
     [cell.contentView addSubview:avatarView];
     [avatarView autoVCenterInSuperview];
     [avatarView autoPinLeadingToSuperviewMargin];
-    [avatarView autoSetDimension:ALDimensionWidth toSize:kAvatarSize];
-    [avatarView autoSetDimension:ALDimensionHeight toSize:kAvatarSize];
+    [avatarView autoSetDimension:ALDimensionWidth toSize:kLargeAvatarSize];
+    [avatarView autoSetDimension:ALDimensionHeight toSize:kLargeAvatarSize];
 
     if (!localProfileAvatarImage) {
         UIImage *cameraImage = [UIImage imageNamed:@"settings-avatar-camera"];
@@ -429,6 +412,8 @@
 
 - (void)showDeleteAccountUI:(BOOL)isRegistered
 {
+    __weak AppSettingsViewController *weakSelf = self;
+    
     UIAlertController *alertController =
         [UIAlertController alertControllerWithTitle:NSLocalizedString(@"CONFIRM_ACCOUNT_DESTRUCTION_TITLE", @"")
                                             message:NSLocalizedString(@"CONFIRM_ACCOUNT_DESTRUCTION_TEXT", @"")
@@ -436,7 +421,7 @@
     [alertController addAction:[UIAlertAction actionWithTitle:NSLocalizedString(@"PROCEED_BUTTON", @"")
                                                         style:UIAlertActionStyleDestructive
                                                       handler:^(UIAlertAction *action) {
-                                                          [self deleteAccount:isRegistered];
+                                                          [weakSelf deleteAccount:isRegistered];
                                                       }]];
     [alertController addAction:[OWSAlerts cancelAction]];
 
@@ -473,13 +458,51 @@
     [RegistrationUtils showReregistrationUIFromViewController:self];
 }
 
+#pragma mark - Dark Theme
+
+- (UIBarButtonItem *)darkThemeBarButton
+{
+    UIBarButtonItem *barButtonItem;
+    if (Theme.isDarkThemeEnabled) {
+        barButtonItem = [[UIBarButtonItem alloc] initWithImage:[UIImage imageNamed:@"ic_dark_theme_on"]
+                                                         style:UIBarButtonItemStylePlain
+                                                        target:self
+                                                        action:@selector(didPressDisableDarkTheme:)];
+    } else {
+        barButtonItem = [[UIBarButtonItem alloc] initWithImage:[UIImage imageNamed:@"ic_dark_theme_off"]
+                                                         style:UIBarButtonItemStylePlain
+                                                        target:self
+                                                        action:@selector(didPressEnableDarkTheme:)];
+    }
+    return barButtonItem;
+}
+
+- (void)didPressEnableDarkTheme:(id)sender
+{
+    [Theme setIsDarkThemeEnabled:YES];
+    [self updateRightBarButtonForTheme];
+    [self updateTableContents];
+}
+
+- (void)didPressDisableDarkTheme:(id)sender
+{
+    [Theme setIsDarkThemeEnabled:NO];
+    [self updateRightBarButtonForTheme];
+    [self updateTableContents];
+}
+
+- (void)updateRightBarButtonForTheme
+{
+    self.navigationItem.rightBarButtonItem = [self darkThemeBarButton];
+}
+
 #pragma mark - Socket Status Notifications
 
 - (void)observeNotifications
 {
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(socketStateDidChange)
-                                                 name:kNSNotification_SocketManagerStateDidChange
+                                                 name:kNSNotification_OWSWebSocketStateDidChange
                                                object:nil];
 }
 

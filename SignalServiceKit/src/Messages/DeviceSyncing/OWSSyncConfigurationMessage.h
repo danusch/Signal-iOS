@@ -10,7 +10,10 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (instancetype)init NS_UNAVAILABLE;
 
-- (instancetype)initWithReadReceiptsEnabled:(BOOL)readReceiptsEnabled NS_DESIGNATED_INITIALIZER;
+- (instancetype)initWithReadReceiptsEnabled:(BOOL)readReceiptsEnabled
+         showUnidentifiedDeliveryIndicators:(BOOL)showUnidentifiedDeliveryIndicators
+                       showTypingIndicators:(BOOL)showTypingIndicators NS_DESIGNATED_INITIALIZER;
+
 - (nullable instancetype)initWithCoder:(NSCoder *)coder NS_DESIGNATED_INITIALIZER;
 
 @end

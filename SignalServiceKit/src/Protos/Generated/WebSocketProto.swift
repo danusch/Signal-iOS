@@ -16,14 +16,27 @@ public enum WebSocketProtoError: Error {
 
     // MARK: - WebSocketProtoWebSocketRequestMessageBuilder
 
+    @objc public class func builder(verb: String, path: String, requestID: UInt64) -> WebSocketProtoWebSocketRequestMessageBuilder {
+        return WebSocketProtoWebSocketRequestMessageBuilder(verb: verb, path: path, requestID: requestID)
+    }
+
+    // asBuilder() constructs a builder that reflects the proto's contents.
+    @objc public func asBuilder() -> WebSocketProtoWebSocketRequestMessageBuilder {
+        let builder = WebSocketProtoWebSocketRequestMessageBuilder(verb: verb, path: path, requestID: requestID)
+        if let _value = body {
+            builder.setBody(_value)
+        }
+        builder.setHeaders(headers)
+        return builder
+    }
+
     @objc public class WebSocketProtoWebSocketRequestMessageBuilder: NSObject {
 
         private var proto = WebSocketProtos_WebSocketRequestMessage()
 
-        @objc public override init() {}
+        @objc fileprivate override init() {}
 
-        // Initializer for required fields
-        @objc public init(verb: String, path: String, requestID: UInt64) {
+        @objc fileprivate init(verb: String, path: String, requestID: UInt64) {
             super.init()
 
             setVerb(verb)
@@ -134,6 +147,10 @@ public enum WebSocketProtoError: Error {
                                                            requestID: requestID)
         return result
     }
+
+    @objc public override var debugDescription: String {
+        return "\(proto)"
+    }
 }
 
 #if DEBUG
@@ -158,14 +175,30 @@ extension WebSocketProtoWebSocketRequestMessage.WebSocketProtoWebSocketRequestMe
 
     // MARK: - WebSocketProtoWebSocketResponseMessageBuilder
 
+    @objc public class func builder(requestID: UInt64, status: UInt32) -> WebSocketProtoWebSocketResponseMessageBuilder {
+        return WebSocketProtoWebSocketResponseMessageBuilder(requestID: requestID, status: status)
+    }
+
+    // asBuilder() constructs a builder that reflects the proto's contents.
+    @objc public func asBuilder() -> WebSocketProtoWebSocketResponseMessageBuilder {
+        let builder = WebSocketProtoWebSocketResponseMessageBuilder(requestID: requestID, status: status)
+        if let _value = message {
+            builder.setMessage(_value)
+        }
+        builder.setHeaders(headers)
+        if let _value = body {
+            builder.setBody(_value)
+        }
+        return builder
+    }
+
     @objc public class WebSocketProtoWebSocketResponseMessageBuilder: NSObject {
 
         private var proto = WebSocketProtos_WebSocketResponseMessage()
 
-        @objc public override init() {}
+        @objc fileprivate override init() {}
 
-        // Initializer for required fields
-        @objc public init(requestID: UInt64, status: UInt32) {
+        @objc fileprivate init(requestID: UInt64, status: UInt32) {
             super.init()
 
             setRequestID(requestID)
@@ -275,6 +308,10 @@ extension WebSocketProtoWebSocketRequestMessage.WebSocketProtoWebSocketRequestMe
                                                             status: status)
         return result
     }
+
+    @objc public override var debugDescription: String {
+        return "\(proto)"
+    }
 }
 
 #if DEBUG
@@ -323,14 +360,29 @@ extension WebSocketProtoWebSocketResponseMessage.WebSocketProtoWebSocketResponse
 
     // MARK: - WebSocketProtoWebSocketMessageBuilder
 
+    @objc public class func builder(type: WebSocketProtoWebSocketMessageType) -> WebSocketProtoWebSocketMessageBuilder {
+        return WebSocketProtoWebSocketMessageBuilder(type: type)
+    }
+
+    // asBuilder() constructs a builder that reflects the proto's contents.
+    @objc public func asBuilder() -> WebSocketProtoWebSocketMessageBuilder {
+        let builder = WebSocketProtoWebSocketMessageBuilder(type: type)
+        if let _value = request {
+            builder.setRequest(_value)
+        }
+        if let _value = response {
+            builder.setResponse(_value)
+        }
+        return builder
+    }
+
     @objc public class WebSocketProtoWebSocketMessageBuilder: NSObject {
 
         private var proto = WebSocketProtos_WebSocketMessage()
 
-        @objc public override init() {}
+        @objc fileprivate override init() {}
 
-        // Initializer for required fields
-        @objc public init(type: WebSocketProtoWebSocketMessageType) {
+        @objc fileprivate init(type: WebSocketProtoWebSocketMessageType) {
             super.init()
 
             setType(type)
@@ -410,6 +462,10 @@ extension WebSocketProtoWebSocketResponseMessage.WebSocketProtoWebSocketResponse
                                                     request: request,
                                                     response: response)
         return result
+    }
+
+    @objc public override var debugDescription: String {
+        return "\(proto)"
     }
 }
 

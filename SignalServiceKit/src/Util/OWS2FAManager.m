@@ -6,8 +6,11 @@
 #import "NSNotificationCenter+OWS.h"
 #import "OWSPrimaryStorage.h"
 #import "OWSRequestFactory.h"
+#import "SSKEnvironment.h"
+#import "TSAccountManager.h"
 #import "TSNetworkManager.h"
 #import "YapDatabaseConnection+OWS.h"
+#import <SignalServiceKit/SignalServiceKit-Swift.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -24,7 +27,6 @@ const NSUInteger kDaySecs = kHourSecs * 24;
 @interface OWS2FAManager ()
 
 @property (nonatomic, readonly) YapDatabaseConnection *dbConnection;
-@property (nonatomic, readonly) TSNetworkManager *networkManager;
 
 @end
 
@@ -34,24 +36,12 @@ const NSUInteger kDaySecs = kHourSecs * 24;
 
 + (instancetype)sharedManager
 {
-    static OWS2FAManager *sharedMyManager = nil;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        sharedMyManager = [[self alloc] initDefault];
-    });
-    return sharedMyManager;
-}
+    OWSAssertDebug(SSKEnvironment.shared.ows2FAManager);
 
-- (instancetype)initDefault
-{
-    OWSPrimaryStorage *primaryStorage = [OWSPrimaryStorage sharedManager];
-    TSNetworkManager *networkManager = [TSNetworkManager sharedManager];
-
-    return [self initWithPrimaryStorage:primaryStorage networkManager:networkManager];
+    return SSKEnvironment.shared.ows2FAManager;
 }
 
 - (instancetype)initWithPrimaryStorage:(OWSPrimaryStorage *)primaryStorage
-                        networkManager:(TSNetworkManager *)networkManager
 {
     self = [super init];
 
@@ -60,15 +50,27 @@ const NSUInteger kDaySecs = kHourSecs * 24;
     }
 
     OWSAssertDebug(primaryStorage);
-    OWSAssertDebug(networkManager);
 
     _dbConnection = primaryStorage.newDatabaseConnection;
-    _networkManager = networkManager;
 
     OWSSingletonAssert();
 
     return self;
 }
+
+#pragma mark - Dependencies
+
+- (TSNetworkManager *)networkManager {
+    OWSAssertDebug(SSKEnvironment.shared.networkManager);
+
+    return SSKEnvironment.shared.networkManager;
+}
+
+- (TSAccountManager *)tsAccountManager {
+    return TSAccountManager.sharedInstance;
+}
+
+#pragma mark -
 
 - (nullable NSString *)pinCode
 {
@@ -87,6 +89,8 @@ const NSUInteger kDaySecs = kHourSecs * 24;
     [[NSNotificationCenter defaultCenter] postNotificationNameAsync:NSNotificationName_2FAStateDidChange
                                                              object:nil
                                                            userInfo:nil];
+
+    [[self.tsAccountManager updateAccountAttributes] retainUntilComplete];
 }
 
 - (void)mark2FAAsEnabledWithPin:(NSString *)pin
@@ -101,6 +105,8 @@ const NSUInteger kDaySecs = kHourSecs * 24;
     [[NSNotificationCenter defaultCenter] postNotificationNameAsync:NSNotificationName_2FAStateDidChange
                                                              object:nil
                                                            userInfo:nil];
+
+    [[self.tsAccountManager updateAccountAttributes] retainUntilComplete];
 }
 
 - (void)requestEnable2FAWithPin:(NSString *)pin

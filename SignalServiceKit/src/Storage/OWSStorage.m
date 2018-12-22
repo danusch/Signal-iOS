@@ -4,7 +4,6 @@
 
 #import "OWSStorage.h"
 #import "AppContext.h"
-#import "NSData+OWS.h"
 #import "NSNotificationCenter+OWS.h"
 #import "NSUserDefaults+OWS.h"
 #import "OWSBackgroundTask.h"
@@ -12,7 +11,8 @@
 #import "OWSPrimaryStorage.h"
 #import "OWSStorage+Subclass.h"
 #import "TSAttachmentStream.h"
-#import <Curve25519Kit/Randomness.h>
+#import <SignalCoreKit/NSData+OWS.h>
+#import <SignalCoreKit/Randomness.h>
 #import <SignalServiceKit/SignalServiceKit-Swift.h>
 #import <YapDatabase/YapDatabase.h>
 #import <YapDatabase/YapDatabaseAutoView.h>
@@ -26,12 +26,6 @@
 NS_ASSUME_NONNULL_BEGIN
 
 NSString *const StorageIsReadyNotification = @"StorageIsReadyNotification";
-
-NSString *const OWSStorageExceptionName_DatabasePasswordInaccessibleWhileBackgrounded
-    = @"OWSStorageExceptionName_DatabasePasswordInaccessibleWhileBackgrounded";
-NSString *const OWSStorageExceptionName_DatabasePasswordUnwritable
-    = @"OWSStorageExceptionName_DatabasePasswordUnwritable";
-NSString *const OWSStorageExceptionName_NoDatabase = @"OWSStorageExceptionName_NoDatabase";
 NSString *const OWSResetStorageNotification = @"OWSResetStorageNotification";
 
 static NSString *keychainService = @"TSKeyChainService";
@@ -86,7 +80,7 @@ NSString *const kNSUserDefaults_DatabaseExtensionVersionMap = @"kNSUserDefaults_
     OWSAssertDebug(delegate.areAllRegistrationsComplete);
 
     OWSBackgroundTask *_Nullable backgroundTask = nil;
-    if (CurrentAppContext().isMainApp) {
+    if (CurrentAppContext().isMainApp && !CurrentAppContext().isRunningTests) {
         backgroundTask = [OWSBackgroundTask backgroundTaskWithLabelStr:__PRETTY_FUNCTION__];
     }
     [super readWriteWithBlock:block];
@@ -330,7 +324,7 @@ NSString *const kNSUserDefaults_DatabaseExtensionVersionMap = @"kNSUserDefaults_
             // Sleep to give analytics events time to be delivered.
             [NSThread sleepForTimeInterval:15.0f];
 
-            OWSRaiseException(OWSStorageExceptionName_NoDatabase, @"Failed to initialize database.");
+            OWSFail(@"Failed to initialize database.");
         }
     }
 }
@@ -503,8 +497,7 @@ NSString *const kNSUserDefaults_DatabaseExtensionVersionMap = @"kNSUserDefaults_
 {
     YapDatabaseConnection *dbConnection = self.database.newConnection;
     if (!dbConnection) {
-        OWSRaiseException(
-            @"OWSStorageExceptionName_CouldNotOpenConnection", @"Storage could not open new database connection.");
+        OWSFail(@"Storage could not open new database connection.");
     }
     return dbConnection;
 }
@@ -824,8 +817,10 @@ NSString *const kNSUserDefaults_DatabaseExtensionVersionMap = @"kNSUserDefaults_
             OWSProdCritical([OWSAnalyticsEvents storageErrorCouldNotLoadDatabaseSecondAttempt]);
         }
 
-        // Try to reset app by deleting database.
-        [OWSStorage resetAllStorage];
+        if (!CurrentAppContext().isRunningTests) {
+            // Try to reset app by deleting database.
+            [OWSStorage resetAllStorage];
+        }
 
         keySpec = [Randomness generateRandomBytes:(int)kSQLCipherKeySpecLength];
         [[self class] storeDatabaseCipherKeySpec:keySpec];
@@ -860,7 +855,7 @@ NSString *const kNSUserDefaults_DatabaseExtensionVersionMap = @"kNSUserDefaults_
     // Presumably this happened in response to a push notification. It's possible that the keychain is corrupted
     // but it could also just be that the user hasn't yet unlocked their device since our password is
     // kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-    OWSRaiseException(OWSStorageExceptionName_DatabasePasswordInaccessibleWhileBackgrounded, @"%@", errorDescription);
+    OWSFail(@"%@", errorDescription);
 }
 
 + (void)deleteDBKeys
@@ -923,8 +918,7 @@ NSString *const kNSUserDefaults_DatabaseExtensionVersionMap = @"kNSUserDefaults_
         // Sleep to give analytics events time to be delivered.
         [NSThread sleepForTimeInterval:15.0f];
 
-        OWSRaiseException(
-            OWSStorageExceptionName_DatabasePasswordUnwritable, @"Setting keychain value failed with error: %@", error);
+        OWSFail(@"Setting keychain value failed with error: %@", error);
     } else {
         OWSLogWarn(@"Successfully set new keychain value.");
     }

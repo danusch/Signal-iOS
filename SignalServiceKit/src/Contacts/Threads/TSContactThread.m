@@ -13,7 +13,7 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-#define TSContactThreadPrefix @"c"
+NSString *const TSContactThreadPrefix = @"c";
 
 @implementation TSContactThread
 
@@ -89,6 +89,19 @@ NS_ASSUME_NONNULL_BEGIN
 
 + (NSString *)contactIdFromThreadId:(NSString *)threadId {
     return [threadId substringWithRange:NSMakeRange(1, threadId.length - 1)];
+}
+
++ (NSString *)conversationColorNameForRecipientId:(NSString *)recipientId
+                                      transaction:(YapDatabaseReadTransaction *)transaction
+{
+    OWSAssertDebug(recipientId.length > 0);
+
+    TSContactThread *_Nullable contactThread =
+        [TSContactThread getThreadWithContactId:recipientId transaction:transaction];
+    if (contactThread) {
+        return contactThread.conversationColorName;
+    }
+    return [self stableColorNameForNewConversationWithString:recipientId];
 }
 
 @end

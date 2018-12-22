@@ -22,6 +22,7 @@ public enum SignalIOSProtoError: Error {
         case thread = 2
         case interaction = 3
         case attachment = 4
+        case misc = 5
     }
 
     private class func SignalIOSProtoBackupSnapshotBackupEntityTypeWrap(_ value: IOSProtos_BackupSnapshot.BackupEntity.TypeEnum) -> SignalIOSProtoBackupSnapshotBackupEntityType {
@@ -31,6 +32,7 @@ public enum SignalIOSProtoError: Error {
         case .thread: return .thread
         case .interaction: return .interaction
         case .attachment: return .attachment
+        case .misc: return .misc
         }
     }
 
@@ -41,23 +43,35 @@ public enum SignalIOSProtoError: Error {
         case .thread: return .thread
         case .interaction: return .interaction
         case .attachment: return .attachment
+        case .misc: return .misc
         }
     }
 
     // MARK: - SignalIOSProtoBackupSnapshotBackupEntityBuilder
 
+    @objc public class func builder(type: SignalIOSProtoBackupSnapshotBackupEntityType, entityData: Data, collection: String, key: String) -> SignalIOSProtoBackupSnapshotBackupEntityBuilder {
+        return SignalIOSProtoBackupSnapshotBackupEntityBuilder(type: type, entityData: entityData, collection: collection, key: key)
+    }
+
+    // asBuilder() constructs a builder that reflects the proto's contents.
+    @objc public func asBuilder() -> SignalIOSProtoBackupSnapshotBackupEntityBuilder {
+        let builder = SignalIOSProtoBackupSnapshotBackupEntityBuilder(type: type, entityData: entityData, collection: collection, key: key)
+        return builder
+    }
+
     @objc public class SignalIOSProtoBackupSnapshotBackupEntityBuilder: NSObject {
 
         private var proto = IOSProtos_BackupSnapshot.BackupEntity()
 
-        @objc public override init() {}
+        @objc fileprivate override init() {}
 
-        // Initializer for required fields
-        @objc public init(type: SignalIOSProtoBackupSnapshotBackupEntityType, entityData: Data) {
+        @objc fileprivate init(type: SignalIOSProtoBackupSnapshotBackupEntityType, entityData: Data, collection: String, key: String) {
             super.init()
 
             setType(type)
             setEntityData(entityData)
+            setCollection(collection)
+            setKey(key)
         }
 
         @objc public func setType(_ valueParam: SignalIOSProtoBackupSnapshotBackupEntityType) {
@@ -66,6 +80,14 @@ public enum SignalIOSProtoError: Error {
 
         @objc public func setEntityData(_ valueParam: Data) {
             proto.entityData = valueParam
+        }
+
+        @objc public func setCollection(_ valueParam: String) {
+            proto.collection = valueParam
+        }
+
+        @objc public func setKey(_ valueParam: String) {
+            proto.key = valueParam
         }
 
         @objc public func build() throws -> SignalIOSProtoBackupSnapshotBackupEntity {
@@ -83,12 +105,20 @@ public enum SignalIOSProtoError: Error {
 
     @objc public let entityData: Data
 
+    @objc public let collection: String
+
+    @objc public let key: String
+
     private init(proto: IOSProtos_BackupSnapshot.BackupEntity,
                  type: SignalIOSProtoBackupSnapshotBackupEntityType,
-                 entityData: Data) {
+                 entityData: Data,
+                 collection: String,
+                 key: String) {
         self.proto = proto
         self.type = type
         self.entityData = entityData
+        self.collection = collection
+        self.key = key
     }
 
     @objc
@@ -112,14 +142,30 @@ public enum SignalIOSProtoError: Error {
         }
         let entityData = proto.entityData
 
+        guard proto.hasCollection else {
+            throw SignalIOSProtoError.invalidProtobuf(description: "\(logTag) missing required field: collection")
+        }
+        let collection = proto.collection
+
+        guard proto.hasKey else {
+            throw SignalIOSProtoError.invalidProtobuf(description: "\(logTag) missing required field: key")
+        }
+        let key = proto.key
+
         // MARK: - Begin Validation Logic for SignalIOSProtoBackupSnapshotBackupEntity -
 
         // MARK: - End Validation Logic for SignalIOSProtoBackupSnapshotBackupEntity -
 
         let result = SignalIOSProtoBackupSnapshotBackupEntity(proto: proto,
                                                               type: type,
-                                                              entityData: entityData)
+                                                              entityData: entityData,
+                                                              collection: collection,
+                                                              key: key)
         return result
+    }
+
+    @objc public override var debugDescription: String {
+        return "\(proto)"
     }
 }
 
@@ -145,11 +191,22 @@ extension SignalIOSProtoBackupSnapshotBackupEntity.SignalIOSProtoBackupSnapshotB
 
     // MARK: - SignalIOSProtoBackupSnapshotBuilder
 
+    @objc public class func builder() -> SignalIOSProtoBackupSnapshotBuilder {
+        return SignalIOSProtoBackupSnapshotBuilder()
+    }
+
+    // asBuilder() constructs a builder that reflects the proto's contents.
+    @objc public func asBuilder() -> SignalIOSProtoBackupSnapshotBuilder {
+        let builder = SignalIOSProtoBackupSnapshotBuilder()
+        builder.setEntity(entity)
+        return builder
+    }
+
     @objc public class SignalIOSProtoBackupSnapshotBuilder: NSObject {
 
         private var proto = IOSProtos_BackupSnapshot()
 
-        @objc public override init() {}
+        @objc fileprivate override init() {}
 
         @objc public func addEntity(_ valueParam: SignalIOSProtoBackupSnapshotBackupEntity) {
             var items = proto.entity
@@ -201,6 +258,10 @@ extension SignalIOSProtoBackupSnapshotBackupEntity.SignalIOSProtoBackupSnapshotB
         let result = SignalIOSProtoBackupSnapshot(proto: proto,
                                                   entity: entity)
         return result
+    }
+
+    @objc public override var debugDescription: String {
+        return "\(proto)"
     }
 }
 

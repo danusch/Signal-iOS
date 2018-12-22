@@ -6,6 +6,7 @@
 #import "OWSBackup.h"
 #import "Signal-Swift.h"
 #import "ThreadUtil.h"
+#import <PromiseKit/AnyPromise.h>
 #import <SignalMessaging/AttachmentSharing.h>
 #import <SignalMessaging/Environment.h>
 #import <SignalMessaging/SignalMessaging-Swift.h>
@@ -18,11 +19,24 @@ NS_ASSUME_NONNULL_BEGIN
 
 @interface OWSBackupSettingsViewController ()
 
+@property (nonatomic, nullable) NSError *iCloudError;
+
 @end
 
 #pragma mark -
 
 @implementation OWSBackupSettingsViewController
+
+#pragma mark - Dependencies
+
+- (OWSBackup *)backup
+{
+    OWSAssertDebug(AppEnvironment.shared.backup);
+
+    return AppEnvironment.shared.backup;
+}
+
+#pragma mark -
 
 - (void)viewDidLoad
 {
@@ -33,6 +47,10 @@ NS_ASSUME_NONNULL_BEGIN
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(backupStateDidChange:)
                                                  name:NSNotificationNameBackupStateDidChange
+                                               object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(applicationDidBecomeActive:)
+                                                 name:OWSApplicationDidBecomeActiveNotification
                                                object:nil];
 
     [self updateTableContents];
@@ -46,7 +64,27 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)viewDidAppear:(BOOL)animated
 {
     [super viewDidAppear:animated];
+
     [self updateTableContents];
+    [self updateICloudStatus];
+}
+
+- (void)updateICloudStatus
+{
+    __weak OWSBackupSettingsViewController *weakSelf = self;
+    [[self.backup ensureCloudKitAccess]
+            .then(^{
+                OWSAssertIsOnMainThread();
+
+                weakSelf.iCloudError = nil;
+                [weakSelf updateTableContents];
+            })
+            .catch(^(NSError *error) {
+                OWSAssertIsOnMainThread();
+
+                weakSelf.iCloudError = error;
+                [weakSelf updateTableContents];
+            }) retainUntilComplete];
 }
 
 #pragma mark - Table Contents
@@ -56,6 +94,20 @@ NS_ASSUME_NONNULL_BEGIN
     OWSTableContents *contents = [OWSTableContents new];
 
     BOOL isBackupEnabled = [OWSBackup.sharedManager isBackupEnabled];
+
+    if (self.iCloudError) {
+        OWSTableSection *iCloudSection = [OWSTableSection new];
+        iCloudSection.headerTitle = NSLocalizedString(
+            @"SETTINGS_BACKUP_ICLOUD_STATUS", @"Label for iCloud status row in the in the backup settings view.");
+        [iCloudSection
+            addItem:[OWSTableItem
+                        longDisclosureItemWithText:[OWSBackupAPI errorMessageForCloudKitAccessError:self.iCloudError]
+                                       actionBlock:^{
+                                           [[UIApplication sharedApplication]
+                                               openURL:[NSURL URLWithString:UIApplicationOpenSettingsURLString]];
+                                       }]];
+        [contents addSection:iCloudSection];
+    }
 
     // TODO: This UI is temporary.
     // Enabling backup will involve entering and registering a PIN.
@@ -75,9 +127,10 @@ NS_ASSUME_NONNULL_BEGIN
         // Enabling backup will involve entering and registering a PIN.
         OWSTableSection *progressSection = [OWSTableSection new];
         [progressSection
-            addItem:[OWSTableItem labelItemWithText:NSLocalizedString(@"SETTINGS_BACKUP_STATUS",
-                                                        @"Label for status row in the in the backup settings view.")
-                                      accessoryText:[self backupExportStateLocalizedDescription]]];
+            addItem:[OWSTableItem
+                        labelItemWithText:NSLocalizedString(@"SETTINGS_BACKUP_STATUS",
+                                              @"Label for backup status row in the in the backup settings view.")
+                            accessoryText:NSStringForBackupExportState(OWSBackup.sharedManager.backupExportState)]];
         if (OWSBackup.sharedManager.backupExportState == OWSBackupState_InProgress) {
             if (OWSBackup.sharedManager.backupExportDescription) {
                 [progressSection
@@ -131,20 +184,6 @@ NS_ASSUME_NONNULL_BEGIN
     self.contents = contents;
 }
 
-- (NSString *)backupExportStateLocalizedDescription
-{
-    switch (OWSBackup.sharedManager.backupExportState) {
-        case OWSBackupState_Idle:
-            return NSLocalizedString(@"SETTINGS_BACKUP_STATUS_IDLE", @"Indicates that app is not backing up.");
-        case OWSBackupState_InProgress:
-            return NSLocalizedString(@"SETTINGS_BACKUP_STATUS_IN_PROGRESS", @"Indicates that app is backing up.");
-        case OWSBackupState_Failed:
-            return NSLocalizedString(@"SETTINGS_BACKUP_STATUS_FAILED", @"Indicates that the last backup failed.");
-        case OWSBackupState_Succeeded:
-            return NSLocalizedString(@"SETTINGS_BACKUP_STATUS_SUCCEEDED", @"Indicates that the last backup succeeded.");
-    }
-}
-
 - (void)isBackupEnabledDidChange:(UISwitch *)sender
 {
     [OWSBackup.sharedManager setIsBackupEnabled:sender.isOn];
@@ -154,7 +193,16 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (void)backupStateDidChange:(NSNotification *)notification
 {
+    OWSAssertIsOnMainThread();
+
     [self updateTableContents];
+}
+
+- (void)applicationDidBecomeActive:(NSNotification *)notification
+{
+    OWSAssertIsOnMainThread();
+
+    [self updateICloudStatus];
 }
 
 @end

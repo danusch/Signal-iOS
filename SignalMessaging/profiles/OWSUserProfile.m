@@ -3,13 +3,16 @@
 //
 
 #import "OWSUserProfile.h"
-#import "NSString+OWS.h"
+#import <PromiseKit/AnyPromise.h>
+#import <SignalCoreKit/Cryptography.h>
+#import <SignalCoreKit/NSData+OWS.h>
+#import <SignalCoreKit/NSString+SSK.h>
 #import <SignalServiceKit/AppContext.h>
-#import <SignalServiceKit/Cryptography.h>
-#import <SignalServiceKit/NSData+OWS.h>
 #import <SignalServiceKit/NSNotificationCenter+OWS.h>
 #import <SignalServiceKit/OWSFileSystem.h>
 #import <SignalServiceKit/OWSPrimaryStorage.h>
+#import <SignalServiceKit/SSKEnvironment.h>
+#import <SignalServiceKit/SignalServiceKit-Swift.h>
 #import <SignalServiceKit/TSAccountManager.h>
 #import <YapDatabase/YapDatabaseConnection.h>
 #import <YapDatabase/YapDatabaseTransaction.h>
@@ -96,6 +99,22 @@ NSString *const kLocalProfileUniqueId = @"kLocalProfileUniqueId";
 
     return self;
 }
+
+#pragma mark - Dependencies
+
+- (id<OWSSyncManagerProtocol>)syncManager
+{
+    return SSKEnvironment.shared.syncManager;
+}
+
+- (TSAccountManager *)tsAccountManager
+{
+    OWSAssertDebug(SSKEnvironment.shared.tsAccountManager);
+    
+    return SSKEnvironment.shared.tsAccountManager;
+}
+
+#pragma mark -
 
 - (nullable NSString *)avatarUrlPath
 {
@@ -209,8 +228,8 @@ NSString *const kLocalProfileUniqueId = @"kLocalProfileUniqueId";
             // We populate an initial (empty) profile on launch of a new install, but until
             // we have a registered account, syncing will fail (and there could not be any
             // linked device to sync to at this point anyway).
-            if ([TSAccountManager isRegistered]) {
-                [CurrentAppContext() doMultiDeviceUpdateWithProfileKey:self.profileKey];
+            if ([self.tsAccountManager isRegistered] && CurrentAppContext().isMainApp) {
+                [[self.syncManager syncLocalContact] retainUntilComplete];
             }
 
             [[NSNotificationCenter defaultCenter] postNotificationNameAsync:kNSNotificationName_LocalProfileDidChange

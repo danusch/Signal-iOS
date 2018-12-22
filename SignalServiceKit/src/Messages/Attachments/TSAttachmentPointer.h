@@ -6,7 +6,16 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+@class OWSBackupFragment;
 @class SSKProtoAttachmentPointer;
+@class TSAttachmentStream;
+@class TSMessage;
+
+typedef NS_ENUM(NSUInteger, TSAttachmentPointerType) {
+    TSAttachmentPointerTypeUnknown = 0,
+    TSAttachmentPointerTypeIncoming = 1,
+    TSAttachmentPointerTypeRestoring = 2,
+};
 
 typedef NS_ENUM(NSUInteger, TSAttachmentPointerState) {
     TSAttachmentPointerStateEnqueued = 0,
@@ -19,6 +28,17 @@ typedef NS_ENUM(NSUInteger, TSAttachmentPointerState) {
  */
 @interface TSAttachmentPointer : TSAttachment
 
+@property (nonatomic) TSAttachmentPointerType pointerType;
+@property (atomic) TSAttachmentPointerState state;
+@property (nullable, atomic) NSString *mostRecentFailureLocalizedText;
+
+// Though now required, `digest` may be null for pre-existing records or from
+// messages received from other clients
+@property (nullable, nonatomic, readonly) NSData *digest;
+
+// Non-nil for attachments which need "lazy backup restore."
+- (nullable OWSBackupFragment *)lazyRestoreFragment;
+
 - (nullable instancetype)initWithCoder:(NSCoder *)coder NS_DESIGNATED_INITIALIZER;
 
 - (instancetype)initWithServerId:(UInt64)serverId
@@ -27,16 +47,24 @@ typedef NS_ENUM(NSUInteger, TSAttachmentPointerState) {
                        byteCount:(UInt32)byteCount
                      contentType:(NSString *)contentType
                   sourceFilename:(nullable NSString *)sourceFilename
+                         caption:(nullable NSString *)caption
+                  albumMessageId:(nullable NSString *)albumMessageId
                   attachmentType:(TSAttachmentType)attachmentType NS_DESIGNATED_INITIALIZER;
 
-+ (nullable TSAttachmentPointer *)attachmentPointerFromProto:(SSKProtoAttachmentPointer *)attachmentProto;
+- (instancetype)initForRestoreWithAttachmentStream:(TSAttachmentStream *)attachmentStream NS_DESIGNATED_INITIALIZER;
 
-@property (atomic) TSAttachmentPointerState state;
-@property (nullable, atomic) NSString *mostRecentFailureLocalizedText;
++ (nullable TSAttachmentPointer *)attachmentPointerFromProto:(SSKProtoAttachmentPointer *)attachmentProto
+                                                albumMessage:(nullable TSMessage *)message;
 
-// Though now required, `digest` may be null for pre-existing records or from
-// messages received from other clients
-@property (nullable, nonatomic, readonly) NSData *digest;
++ (NSArray<TSAttachmentPointer *> *)attachmentPointersFromProtos:
+                                        (NSArray<SSKProtoAttachmentPointer *> *)attachmentProtos
+                                                    albumMessage:(TSMessage *)message;
+
+#pragma mark - Update With... Methods
+
+// Marks attachment as needing "lazy backup restore."
+- (void)markForLazyRestoreWithFragment:(OWSBackupFragment *)lazyRestoreFragment
+                           transaction:(YapDatabaseReadWriteTransaction *)transaction;
 
 @end
 

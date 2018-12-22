@@ -36,7 +36,7 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic) UIButton *shareButton;
 
 @property (nonatomic) TSAttachmentStream *attachmentStream;
-@property (nonatomic, nullable) ConversationViewItem *viewItem;
+@property (nonatomic, nullable) id<ConversationViewItem> viewItem;
 @property (nonatomic, nullable) UIImage *image;
 
 @property (nonatomic, nullable) OWSVideoPlayer *videoPlayer;
@@ -63,7 +63,7 @@ NS_ASSUME_NONNULL_BEGIN
 }
 
 - (instancetype)initWithGalleryItemBox:(GalleryItemBox *)galleryItemBox
-                              viewItem:(ConversationViewItem *_Nullable)viewItem
+                              viewItem:(nullable id<ConversationViewItem>)viewItem
 {
     self = [super initWithNibName:nil bundle:nil];
     if (!self) {
@@ -346,28 +346,6 @@ NS_ASSUME_NONNULL_BEGIN
         // If already zoomed in at all, zoom out all the way.
         [self zoomOutAnimated:YES];
     }
-}
-
-- (void)didPressShare:(id)sender
-{
-    OWSLogInfo(@"didPressShare");
-    if (!self.viewItem) {
-        OWSFailDebug(@"share should only be available when a viewItem is present");
-        return;
-    }
-
-    [self.viewItem shareMediaAction];
-}
-
-- (void)didPressDelete:(id)sender
-{
-    OWSLogInfo(@"didPressDelete");
-    if (!self.viewItem) {
-        OWSFailDebug(@"delete should only be available when a viewItem is present");
-        return;
-    }
-
-    [self.delegate mediaDetailViewController:self requestDeleteConversationViewItem:self.viewItem];
 }
 
 - (void)didPressPlayBarButton:(id)sender

@@ -64,7 +64,7 @@ public class ConversationStyle: NSObject {
     public required init(thread: TSThread) {
 
         self.thread = thread
-        self.primaryColor = ConversationStyle.primaryColor(thread: thread)
+        self.conversationColor = ConversationStyle.conversationColor(thread: thread)
 
         super.init()
 
@@ -126,21 +126,18 @@ public class ConversationStyle: NSObject {
 
         lastTextLineAxis = CGFloat(round(baseFontOffset + messageTextFont.capHeight * 0.5))
 
-        self.primaryColor = ConversationStyle.primaryColor(thread: thread)
+        self.conversationColor = ConversationStyle.conversationColor(thread: thread)
     }
 
     // MARK: Colors
 
-    private class func primaryColor(thread: TSThread) -> UIColor {
-        guard let colorName = thread.conversationColorName else {
-            return self.defaultBubbleColorIncoming
-        }
+    @objc
+    public var conversationColor: OWSConversationColor
 
-        guard let color = UIColor.ows_conversationColor(colorName: colorName) else {
-            return self.defaultBubbleColorIncoming
-        }
+    private class func conversationColor(thread: TSThread) -> OWSConversationColor {
+        let colorName = thread.conversationColorName
 
-        return color
+        return OWSConversationColor.conversationColorOrDefault(colorName: colorName)
     }
 
     @objc
@@ -159,9 +156,6 @@ public class ConversationStyle: NSObject {
 
     @objc
     public let dateBreakTextColor = UIColor.ows_gray60
-
-    @objc
-    public var primaryColor: UIColor
 
     @objc
     public func bubbleColor(message: TSMessage) -> UIColor {
@@ -193,11 +187,13 @@ public class ConversationStyle: NSObject {
 
     @objc
     public static var bubbleTextColorIncoming: UIColor {
-        return Theme.isDarkThemeEnabled ? UIColor.ows_white : UIColor.ows_gray90
+        return Theme.isDarkThemeEnabled ? UIColor.ows_gray05 : UIColor.ows_gray90
     }
 
     @objc
-    public static var bubbleTextColorOutgoing = UIColor.ows_white
+    public static var bubbleTextColorOutgoing: UIColor {
+        return Theme.isDarkThemeEnabled ? UIColor.ows_gray05 : UIColor.ows_white
+    }
 
     @objc
     public func bubbleTextColor(message: TSMessage) -> UIColor {
@@ -228,8 +224,11 @@ public class ConversationStyle: NSObject {
     @objc
     public func quotedReplyBubbleColor(isIncoming: Bool) -> UIColor {
         if Theme.isDarkThemeEnabled {
-            let alpha: CGFloat = (isIncoming ? 0.6 :0.5)
-            return UIColor.white.blend(with: bubbleColorOutgoingSent, alpha: alpha)
+            if isIncoming {
+                return UIColor(rgbHex: 0x1976D2).withAlphaComponent(0.75)
+            } else {
+                return UIColor.ows_black.withAlphaComponent(0.4)
+            }
         } else if isIncoming {
             return bubbleColorOutgoingSent.withAlphaComponent(0.25)
         } else {
@@ -239,7 +238,13 @@ public class ConversationStyle: NSObject {
 
     @objc
     public func quotedReplyStripeColor(isIncoming: Bool) -> UIColor {
-        if isIncoming {
+        if Theme.isDarkThemeEnabled {
+            if isIncoming {
+                return UIColor(rgbHex: 0x1976D2)
+            } else {
+                return UIColor.ows_black
+            }
+        } else if isIncoming {
             return bubbleColorOutgoingSent
         } else {
             return UIColor.white
@@ -254,12 +259,16 @@ public class ConversationStyle: NSObject {
 
     @objc
     public func quotedReplyAuthorColor() -> UIColor {
-        return UIColor.ows_gray90
+        return quotedReplyTextColor()
     }
 
     @objc
     public func quotedReplyTextColor() -> UIColor {
-        return UIColor.ows_gray90
+        if Theme.isDarkThemeEnabled {
+            return UIColor.ows_gray05
+        } else {
+            return UIColor.ows_gray90
+        }
     }
 
     @objc

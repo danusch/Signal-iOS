@@ -3,14 +3,14 @@
 //
 
 #import "TSMessage.h"
-#import "NSDate+OWS.h"
-#import "SSKBaseTest.h"
+#import "SSKBaseTestObjC.h"
 #import "TSAttachmentStream.h"
 #import "TSContactThread.h"
+#import <SignalCoreKit/NSDate+OWS.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
-@interface TSMessageTest : SSKBaseTest
+@interface TSMessageTest : SSKBaseTestObjC
 
 @property TSThread *thread;
 

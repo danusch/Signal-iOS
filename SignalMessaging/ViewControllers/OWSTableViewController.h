@@ -101,6 +101,8 @@ typedef UITableViewCell *_Nonnull (^OWSTableCustomCellBlock)(void);
 
 + (OWSTableItem *)labelItemWithText:(NSString *)text accessoryText:(NSString *)accessoryText;
 
++ (OWSTableItem *)longDisclosureItemWithText:(NSString *)text actionBlock:(nullable OWSTableActionBlock)actionBlock;
+
 + (OWSTableItem *)switchItemWithText:(NSString *)text isOn:(BOOL)isOn target:(id)target selector:(SEL)selector;
 
 + (OWSTableItem *)switchItemWithText:(NSString *)text
@@ -133,9 +135,13 @@ typedef UITableViewCell *_Nonnull (^OWSTableCustomCellBlock)(void);
 
 @property (nonatomic) UITableViewStyle tableViewStyle;
 
+- (instancetype)init NS_DESIGNATED_INITIALIZER;
+
 #pragma mark - Presentation
 
 - (void)presentFromViewController:(UIViewController *)fromViewController;
+
+- (void)applyTheme;
 
 @end
 

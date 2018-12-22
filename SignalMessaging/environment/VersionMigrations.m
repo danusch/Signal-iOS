@@ -30,7 +30,16 @@ NS_ASSUME_NONNULL_BEGIN
 
 @implementation VersionMigrations
 
-#pragma mark Utility methods
+#pragma mark - Dependencies
+
++ (TSAccountManager *)tsAccountManager
+{
+    OWSAssertDebug(SSKEnvironment.shared.tsAccountManager);
+    
+    return SSKEnvironment.shared.tsAccountManager;
+}
+
+#pragma mark - Utility methods
 
 + (void)performUpdateCheckWithCompletion:(VersionMigrationCompletion)completion
 {
@@ -48,8 +57,7 @@ NS_ASSUME_NONNULL_BEGIN
 
     if (!previousVersion) {
         OWSLogInfo(@"No previous version found. Probably first launch since install - nothing to migrate.");
-        OWSDatabaseMigrationRunner *runner =
-            [[OWSDatabaseMigrationRunner alloc] initWithPrimaryStorage:[OWSPrimaryStorage sharedManager]];
+        OWSDatabaseMigrationRunner *runner = [[OWSDatabaseMigrationRunner alloc] init];
         [runner assumeAllExistingMigrationsRun];
         dispatch_async(dispatch_get_main_queue(), ^{
             completion();
@@ -69,26 +77,24 @@ NS_ASSUME_NONNULL_BEGIN
         UIAlertAction *quitAction = [UIAlertAction actionWithTitle:@"Quit"
                                                              style:UIAlertActionStyleDefault
                                                            handler:^(UIAlertAction *_Nonnull action) {
-                                                               [DDLog flushLog];
-                                                               exit(0);
+                                                               OWSFail(@"Obsolete install.");
                                                            }];
         [alertController addAction:quitAction];
 
         [CurrentAppContext().frontmostViewController presentViewController:alertController animated:YES completion:nil];
     }
 
-    if ([self isVersion:previousVersion atLeast:@"2.0.0" andLessThan:@"2.1.70"] && [TSAccountManager isRegistered]) {
+    if ([self isVersion:previousVersion atLeast:@"2.0.0" andLessThan:@"2.1.70"] && [self.tsAccountManager isRegistered]) {
         [self clearVideoCache];
         [self blockingAttributesUpdate];
     }
 
-    if ([self isVersion:previousVersion atLeast:@"2.0.0" andLessThan:@"2.3.0"] && [TSAccountManager isRegistered]) {
+    if ([self isVersion:previousVersion atLeast:@"2.0.0" andLessThan:@"2.3.0"] && [self.tsAccountManager isRegistered]) {
         [self clearBloomFilterCache];
     }
 
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        [[[OWSDatabaseMigrationRunner alloc] initWithPrimaryStorage:[OWSPrimaryStorage sharedManager]]
-            runAllOutstandingWithCompletion:completion];
+        [[[OWSDatabaseMigrationRunner alloc] init] runAllOutstandingWithCompletion:completion];
     });
 }
 
@@ -129,7 +135,7 @@ NS_ASSUME_NONNULL_BEGIN
     }
 }
 
-#pragma mark Upgrading to 2.1.3 - Adding VOIP flag on TS Server
+#pragma mark - Update Account Attributes
 
 + (void)blockingAttributesUpdate
 {
@@ -140,7 +146,7 @@ NS_ASSUME_NONNULL_BEGIN
 
         __block BOOL success;
 
-        TSRequest *request = [OWSRequestFactory updateAttributesRequestWithManualMessageFetching:NO];
+        TSRequest *request = [OWSRequestFactory updateAttributesRequest];
         [[TSNetworkManager sharedManager] makeRequest:request
             success:^(NSURLSessionDataTask *task, id responseObject) {
                 success = YES;

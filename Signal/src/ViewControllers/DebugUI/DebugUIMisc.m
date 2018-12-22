@@ -20,6 +20,7 @@
 #import <SignalServiceKit/TSInvalidIdentityKeyReceivingErrorMessage.h>
 #import <SignalServiceKit/TSThread.h>
 #import <SignalServiceKit/UIImage+OWS.h>
+#import "DebugUIMessagesAssetLoader.h"
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -113,13 +114,24 @@ NS_ASSUME_NONNULL_BEGIN
                                          [OWS2FAManager.sharedManager setDefaultRepetitionInterval];
                                      }]];
 
-
 #ifdef DEBUG
     [items addObject:[OWSTableItem subPageItemWithText:@"Share UIImage"
                                            actionBlock:^(UIViewController *viewController) {
                                                UIImage *image =
-                                                   [UIImage imageWithColor:UIColor.redColor size:CGSizeMake(1.f, 1.f)];
+                                               [UIImage imageWithColor:UIColor.redColor size:CGSizeMake(1.f, 1.f)];
                                                [AttachmentSharing showShareUIForUIImage:image];
+                                           }]];
+    [items addObject:[OWSTableItem subPageItemWithText:@"Share 2 Images"
+                                           actionBlock:^(UIViewController *viewController) {
+                                               [DebugUIMisc shareImages:2];
+                                           }]];
+    [items addObject:[OWSTableItem subPageItemWithText:@"Share 2 Videos"
+                                           actionBlock:^(UIViewController *viewController) {
+                                               [DebugUIMisc shareVideos:2];
+                                           }]];
+    [items addObject:[OWSTableItem subPageItemWithText:@"Share 2 PDFs"
+                                           actionBlock:^(UIViewController *viewController) {
+                                               [DebugUIMisc sharePDFs:2];
                                            }]];
 #endif
 
@@ -135,6 +147,11 @@ NS_ASSUME_NONNULL_BEGIN
     [items addObject:[OWSTableItem itemWithTitle:@"Fetch system contacts"
                                      actionBlock:^() {
                                          [Environment.shared.contactsManager requestSystemContactsOnce];
+                                     }]];
+
+    [items addObject:[OWSTableItem itemWithTitle:@"Cycle websockets"
+                                     actionBlock:^() {
+                                         [SSKEnvironment.shared.socketManager cycleSocket];
                                      }]];
 
     return [OWSTableSection sectionWithTitle:self.name items:items];
@@ -230,7 +247,6 @@ NS_ASSUME_NONNULL_BEGIN
         return;
     }
 
-    OWSMessageSender *messageSender = SSKEnvironment.shared.messageSender;
     NSString *utiType = [MIMETypeUtil utiTypeForFileExtension:fileName.pathExtension];
     DataSource *_Nullable dataSource = [DataSourcePath dataSourceWithFilePath:filePath shouldDeleteOnDeallocation:YES];
     [dataSource setSourceFilename:fileName];
@@ -241,11 +257,7 @@ NS_ASSUME_NONNULL_BEGIN
         OWSFailDebug(@"attachment[%@]: %@", [attachment sourceFilename], [attachment errorName]);
         return;
     }
-    [ThreadUtil sendMessageWithAttachment:attachment
-                                 inThread:thread
-                         quotedReplyModel:nil
-                            messageSender:messageSender
-                               completion:nil];
+    [ThreadUtil enqueueMessageWithAttachment:attachment inThread:thread quotedReplyModel:nil];
 }
 
 + (void)sendUnencryptedDatabase:(TSThread *)thread
@@ -259,7 +271,6 @@ NS_ASSUME_NONNULL_BEGIN
         return;
     }
 
-    OWSMessageSender *messageSender = SSKEnvironment.shared.messageSender;
     NSString *utiType = [MIMETypeUtil utiTypeForFileExtension:fileName.pathExtension];
     DataSource *_Nullable dataSource = [DataSourcePath dataSourceWithFilePath:filePath shouldDeleteOnDeallocation:YES];
     [dataSource setSourceFilename:fileName];
@@ -268,12 +279,68 @@ NS_ASSUME_NONNULL_BEGIN
         OWSFailDebug(@"attachment[%@]: %@", [attachment sourceFilename], [attachment errorName]);
         return;
     }
-    [ThreadUtil sendMessageWithAttachment:attachment
-                                 inThread:thread
-                         quotedReplyModel:nil
-                            messageSender:messageSender
-                               completion:nil];
+    [ThreadUtil enqueueMessageWithAttachment:attachment inThread:thread quotedReplyModel:nil];
 }
+
+#ifdef DEBUG
+
++ (void)shareAssets:(NSUInteger)count
+   fromAssetLoaders:(NSArray<DebugUIMessagesAssetLoader *> *)assetLoaders
+{
+    [DebugUIMessagesAssetLoader prepareAssetLoaders:assetLoaders
+                                            success:^{
+                                                      [self shareAssets:count
+                                               fromPreparedAssetLoaders:assetLoaders];
+                                                      }
+                                            failure:^{
+                                                OWSLogError(@"Could not prepare asset loaders.");
+                                                      }];
+}
+
++ (void)shareAssets:(NSUInteger)count
+   fromPreparedAssetLoaders:(NSArray<DebugUIMessagesAssetLoader *> *)assetLoaders
+{
+    __block NSMutableArray<NSURL *> *urls = [NSMutableArray new];
+    for (NSUInteger i = 0;i < count;i++) {
+        DebugUIMessagesAssetLoader *assetLoader = assetLoaders[arc4random_uniform((uint32_t) assetLoaders.count)];
+        NSString *filePath = [OWSFileSystem temporaryFilePathWithFileExtension:assetLoader.filePath.pathExtension];
+        NSError *error;
+        [[NSFileManager defaultManager] copyItemAtPath:assetLoader.filePath toPath:filePath error:&error];
+        OWSAssertDebug(!error);
+        [urls addObject:[NSURL fileURLWithPath:filePath]];
+    }
+    OWSLogVerbose(@"urls: %@", urls);
+    [AttachmentSharing showShareUIForURLs:urls completion:^{
+                                                            urls = nil;
+                                                            }];
+}
+
++ (void)shareImages:(NSUInteger)count
+{
+    [self shareAssets:count
+     fromAssetLoaders:@[
+                        [DebugUIMessagesAssetLoader jpegInstance],
+                        [DebugUIMessagesAssetLoader tinyPngInstance],
+                        ]];
+}
+
++ (void)shareVideos:(NSUInteger)count
+{
+    [self shareAssets:count
+     fromAssetLoaders:@[
+                        [DebugUIMessagesAssetLoader mp4Instance],
+                        ]];
+}
+
++ (void)sharePDFs:(NSUInteger)count
+{
+    [self shareAssets:count
+     fromAssetLoaders:@[
+                        [DebugUIMessagesAssetLoader tinyPdfInstance],
+                        ]];
+}
+
+#endif
 
 @end
 

@@ -58,8 +58,12 @@ public class OWSNavigationBar: UINavigationBar {
     // MARK: Theme
 
     private func applyTheme() {
+        guard respectsTheme else {
+            return
+        }
+
         if UIAccessibilityIsReduceTransparencyEnabled() {
-            self.blurEffectView?.removeFromSuperview()
+            blurEffectView?.isHidden = true
             let color = Theme.navbarBackgroundColor
             let backgroundImage = UIImage(color: color)
             self.setBackgroundImage(backgroundImage, for: .default)
@@ -74,6 +78,7 @@ public class OWSNavigationBar: UINavigationBar {
 
             let blurEffectView: UIVisualEffectView = {
                 if let existingBlurEffectView = self.blurEffectView {
+                    existingBlurEffectView.isHidden = false
                     return existingBlurEffectView
                 }
 
@@ -105,6 +110,13 @@ public class OWSNavigationBar: UINavigationBar {
     public func themeDidChange() {
         Logger.debug("")
         applyTheme()
+    }
+
+    @objc
+    public var respectsTheme: Bool = true {
+        didSet {
+            themeDidChange()
+        }
     }
 
     // MARK: Layout
@@ -144,9 +156,11 @@ public class OWSNavigationBar: UINavigationBar {
     }
 
     public override func layoutSubviews() {
-        guard OWSWindowManager.shared().hasCall() else {
-            super.layoutSubviews()
-            return
+        if CurrentAppContext().isMainApp {
+            guard OWSWindowManager.shared().hasCall() else {
+                super.layoutSubviews()
+                return
+            }
         }
 
         guard #available(iOS 11, *) else {
@@ -172,15 +186,37 @@ public class OWSNavigationBar: UINavigationBar {
         }
     }
 
-    // MARK: 
+    // MARK: Override Theme
 
     @objc
-    public func makeClear() {
-        self.backgroundColor = .clear
-        // Making a toolbar transparent requires setting an empty uiimage
-        self.setBackgroundImage(UIImage(), for: .default)
-        self.shadowImage = UIImage()
-        self.clipsToBounds = true
-        self.blurEffectView?.isHidden = true
+    public enum NavigationBarThemeOverride: Int {
+        case clear, alwaysDark
+    }
+
+    @objc
+    public func overrideTheme(type: NavigationBarThemeOverride) {
+        respectsTheme = false
+
+        barStyle = .black
+        titleTextAttributes = [NSAttributedStringKey.foregroundColor: Theme.darkThemePrimaryColor]
+        barTintColor = Theme.darkThemeBackgroundColor.withAlphaComponent(0.6)
+        tintColor = Theme.darkThemePrimaryColor
+
+        switch type {
+        case .clear:
+            blurEffectView?.isHidden = true
+            clipsToBounds = true
+
+            // Making a toolbar transparent requires setting an empty uiimage
+            setBackgroundImage(UIImage(), for: .default)
+            shadowImage = UIImage()
+            backgroundColor = .clear
+        case .alwaysDark:
+            blurEffectView?.isHidden = false
+            clipsToBounds = false
+
+            setBackgroundImage(nil, for: .default)
+            shadowImage = nil
+        }
     }
 }

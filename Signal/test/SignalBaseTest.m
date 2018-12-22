@@ -13,7 +13,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (void)setUp
 {
-    NSLog(@"%@ setUp", self.logTag);
+    OWSLogInfo(@"");
 
     [super setUp];
 
@@ -23,19 +23,13 @@ NS_ASSUME_NONNULL_BEGIN
 
     SetCurrentAppContext([TestAppContext new]);
 
-    [MockEnvironment activate];
     [MockSSKEnvironment activate];
+    [MockEnvironment activate];
 }
 
 - (void)tearDown
 {
-    NSLog(@"%@ tearDown", self.logTag);
-
-    [SSKEnvironment.shared.primaryStorage closeStorageForTests];
-
-    ClearCurrentAppContextForTests();
-    [Environment clearSharedForTests];
-    [SSKEnvironment clearSharedForTests];
+    OWSLogInfo(@"");
 
     [super tearDown];
 }

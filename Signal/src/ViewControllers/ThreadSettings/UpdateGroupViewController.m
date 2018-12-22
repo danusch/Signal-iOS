@@ -8,6 +8,7 @@
 #import "OWSNavigationController.h"
 #import "Signal-Swift.h"
 #import "ViewControllerUtils.h"
+#import <SignalCoreKit/NSDate+OWS.h>
 #import <SignalMessaging/BlockListUIUtils.h>
 #import <SignalMessaging/ContactTableViewCell.h>
 #import <SignalMessaging/ContactsViewHelper.h>
@@ -19,7 +20,6 @@
 #import <SignalMessaging/UIUtil.h>
 #import <SignalMessaging/UIView+OWS.h>
 #import <SignalMessaging/UIViewController+OWS.h>
-#import <SignalServiceKit/NSDate+OWS.h>
 #import <SignalServiceKit/OWSMessageSender.h>
 #import <SignalServiceKit/SignalAccount.h>
 #import <SignalServiceKit/TSGroupModel.h>
@@ -179,15 +179,14 @@ NS_ASSUME_NONNULL_BEGIN
     [threadInfoView autoPinWidthToSuperviewWithMargin:16.f];
     [threadInfoView autoPinHeightToSuperviewWithMargin:16.f];
 
-    const CGFloat kAvatarSize = 68.f;
     AvatarImageView *avatarView = [AvatarImageView new];
     _avatarView = avatarView;
 
     [threadInfoView addSubview:avatarView];
     [avatarView autoVCenterInSuperview];
     [avatarView autoPinLeadingToSuperviewMargin];
-    [avatarView autoSetDimension:ALDimensionWidth toSize:kAvatarSize];
-    [avatarView autoSetDimension:ALDimensionHeight toSize:kAvatarSize];
+    [avatarView autoSetDimension:ALDimensionWidth toSize:kLargeAvatarSize];
+    [avatarView autoSetDimension:ALDimensionHeight toSize:kLargeAvatarSize];
     _groupAvatar = self.thread.groupModel.groupImage;
     [self updateAvatarView];
 
@@ -284,8 +283,7 @@ NS_ASSUME_NONNULL_BEGIN
                                     @"An indicator that a user is a new member of the group.");
                             }
 
-                            [cell configureWithRecipientId:recipientId
-                                           contactsManager:contactsViewHelper.contactsManager];
+                            [cell configureWithRecipientId:recipientId];
                             return cell;
                         }
                         customRowHeight:UITableViewAutomaticDimension
@@ -397,7 +395,11 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (void)updateAvatarView
 {
-    self.avatarView.image = (self.groupAvatar ?: [UIImage imageNamed:@"empty-group-avatar"]);
+    UIImage *_Nullable groupAvatar = self.groupAvatar;
+    if (!groupAvatar) {
+        groupAvatar = [[[OWSGroupAvatarBuilder alloc] initWithThread:self.thread diameter:kLargeAvatarSize] build];
+    }
+    self.avatarView.image = groupAvatar;
 }
 
 #pragma mark - Event Handling

@@ -3,10 +3,10 @@
 //
 
 #import "OWSLinkDeviceViewController.h"
-#import "Cryptography.h"
 #import "OWSDeviceProvisioningURLParser.h"
 #import "OWSLinkedDevicesTableViewController.h"
 #import "Signal-Swift.h"
+#import <SignalCoreKit/Cryptography.h>
 #import <SignalMessaging/OWSProfileManager.h>
 #import <SignalServiceKit/OWSDevice.h>
 #import <SignalServiceKit/OWSDeviceProvisioner.h>
@@ -46,6 +46,8 @@ NS_ASSUME_NONNULL_BEGIN
         = NSLocalizedString(@"LINK_NEW_DEVICE_TITLE", "Navigation title when scanning QR code to add new device.");
 }
 
+#pragma mark - Dependencies
+
 - (OWSProfileManager *)profileManager
 {
     return [OWSProfileManager sharedManager];
@@ -55,6 +57,23 @@ NS_ASSUME_NONNULL_BEGIN
 {
     return [OWSReadReceiptManager sharedManager];
 }
+
+- (id<OWSUDManager>)udManager
+{
+    return SSKEnvironment.shared.udManager;
+}
+
+- (TSAccountManager *)tsAccountManager
+{
+    return TSAccountManager.sharedInstance;
+}
+
+- (TSSocketManager *)socketManager
+{
+    return SSKEnvironment.shared.socketManager;
+}
+
+#pragma mark -
 
 - (void)viewWillAppear:(BOOL)animated
 {
@@ -172,7 +191,11 @@ NS_ASSUME_NONNULL_BEGIN
 
                 // The service implementation of the socket connection caches the linked device state,
                 // so all sync message sends will fail on the socket until it is cycled.
-                [TSSocketManager.sharedManager cycleSocket];
+                [TSSocketManager.shared cycleSocket];
+
+                // Fetch the local profile to determine if all
+                // linked devices support UD.
+                [self.profileManager fetchLocalUsersProfile];
             });
         }
         failure:^(NSError *error) {

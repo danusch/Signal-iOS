@@ -2,6 +2,7 @@
 //  Copyright (c) 2018 Open Whisper Systems. All rights reserved.
 //
 
+#import "OWSAudioPlayer.h"
 #import <AudioToolbox/AudioServices.h>
 
 NS_ASSUME_NONNULL_BEGIN
@@ -40,12 +41,15 @@ typedef NS_ENUM(NSUInteger, OWSSound) {
 };
 
 @class OWSAudioPlayer;
+@class OWSPrimaryStorage;
 @class TSThread;
 @class YapDatabaseReadWriteTransaction;
 
 @interface OWSSounds : NSObject
 
 - (instancetype)init NS_UNAVAILABLE;
+
+- (instancetype)initWithPrimaryStorage:(OWSPrimaryStorage *)primaryStorage NS_DESIGNATED_INITIALIZER;
 
 + (NSString *)displayNameForSound:(OWSSound)sound;
 
@@ -65,7 +69,8 @@ typedef NS_ENUM(NSUInteger, OWSSound) {
 
 #pragma mark - AudioPlayer
 
-+ (nullable OWSAudioPlayer *)audioPlayerForSound:(OWSSound)sound;
++ (nullable OWSAudioPlayer *)audioPlayerForSound:(OWSSound)sound
+                                   audioBehavior:(OWSAudioBehavior)audioBehavior;
 
 @end
 

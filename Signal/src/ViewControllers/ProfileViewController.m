@@ -12,11 +12,11 @@
 #import "UIColor+OWS.h"
 #import "UIFont+OWS.h"
 #import "UIView+OWS.h"
+#import <SignalCoreKit/NSDate+OWS.h>
 #import <SignalMessaging/NSString+OWS.h>
 #import <SignalMessaging/OWSNavigationController.h>
 #import <SignalMessaging/OWSProfileManager.h>
 #import <SignalMessaging/UIViewController+OWS.h>
-#import <SignalServiceKit/NSDate+OWS.h>
 #import <SignalServiceKit/OWSPrimaryStorage.h>
 
 NS_ASSUME_NONNULL_BEGIN
@@ -85,6 +85,10 @@ NSString *const kProfileView_LastPresentedDate = @"kProfileView_LastPresentedDat
 
     [self createViews];
     [self updateNavigationItem];
+
+    if (self.nameTextField.text.length > 0) {
+        self.hasUnsavedChanges = YES;
+    }
 }
 
 - (void)createViews
@@ -165,12 +169,11 @@ NSString *const kProfileView_LastPresentedDate = @"kProfileView_LastPresentedDat
     [self updateAvatarView];
     [self.avatarView autoPinTrailingToSuperviewMargin];
     [self.avatarView autoPinLeadingToTrailingEdgeOfView:avatarLabel offset:10.f];
-    const CGFloat kAvatarSizePoints = 50.f;
     const CGFloat kAvatarVMargin = 4.f;
     [self.avatarView autoPinEdgeToSuperviewEdge:ALEdgeTop withInset:kAvatarVMargin];
     [self.avatarView autoPinEdgeToSuperviewEdge:ALEdgeBottom withInset:kAvatarVMargin];
-    [self.avatarView autoSetDimension:ALDimensionWidth toSize:kAvatarSizePoints];
-    [self.avatarView autoSetDimension:ALDimensionHeight toSize:kAvatarSizePoints];
+    [self.avatarView autoSetDimension:ALDimensionWidth toSize:self.avatarSize];
+    [self.avatarView autoSetDimension:ALDimensionHeight toSize:self.avatarSize];
     [self.cameraImageView autoPinTrailingToEdgeOfView:self.avatarView];
     [self.cameraImageView autoPinEdge:ALEdgeBottom toEdge:ALEdgeBottom ofView:self.avatarView];
 
@@ -284,7 +287,8 @@ NSString *const kProfileView_LastPresentedDate = @"kProfileView_LastPresentedDat
         [self profileCompletedOrSkipped];
         return;
     }
-
+ 
+    __weak ProfileViewController *weakSelf = self;
     UIAlertController *controller = [UIAlertController
         alertControllerWithTitle:
             NSLocalizedString(@"NEW_GROUP_VIEW_UNSAVED_CHANGES_TITLE",
@@ -298,7 +302,7 @@ NSString *const kProfileView_LastPresentedDate = @"kProfileView_LastPresentedDat
                                                      @"The label for the 'discard' button in alerts and action sheets.")
                                            style:UIAlertActionStyleDestructive
                                          handler:^(UIAlertAction *action) {
-                                             [self profileCompletedOrSkipped];
+                                             [weakSelf profileCompletedOrSkipped];
                                          }]];
     [controller addAction:[OWSAlerts cancelAction]];
     [self presentViewController:controller animated:YES completion:nil];
@@ -380,35 +384,30 @@ NSString *const kProfileView_LastPresentedDate = @"kProfileView_LastPresentedDat
     }
 
     // Show an activity indicator to block the UI during the profile upload.
-    UIAlertController *alertController = [UIAlertController
-        alertControllerWithTitle:NSLocalizedString(@"PROFILE_VIEW_SAVING",
-                                     @"Alert title that indicates the user's profile view is being saved.")
-                         message:nil
-                  preferredStyle:UIAlertControllerStyleAlert];
-
-    [self presentViewController:alertController
-                       animated:YES
-                     completion:^{
-                         [OWSProfileManager.sharedManager updateLocalProfileName:normalizedProfileName
-                             avatarImage:self.avatar
-                             success:^{
-                                 [alertController dismissViewControllerAnimated:NO
-                                                                     completion:^{
-                                                                         [weakSelf updateProfileCompleted];
-                                                                     }];
-                             }
-                             failure:^{
-                                 [alertController
-                                     dismissViewControllerAnimated:NO
-                                                        completion:^{
-                                                            [OWSAlerts showErrorAlertWithMessage:
-                                                                           NSLocalizedString(
+    [ModalActivityIndicatorViewController
+        presentFromViewController:self
+                        canCancel:NO
+                  backgroundBlock:^(ModalActivityIndicatorViewController *modalActivityIndicator) {
+                      [OWSProfileManager.sharedManager updateLocalProfileName:normalizedProfileName
+                          avatarImage:weakSelf.avatar
+                          success:^{
+                              dispatch_async(dispatch_get_main_queue(), ^{
+                                  [modalActivityIndicator dismissWithCompletion:^{
+                                      [weakSelf updateProfileCompleted];
+                                  }];
+                              });
+                          }
+                          failure:^{
+                              dispatch_async(dispatch_get_main_queue(), ^{
+                                  [modalActivityIndicator dismissWithCompletion:^{
+                                      [OWSAlerts showErrorAlertWithMessage:NSLocalizedString(
                                                                                @"PROFILE_VIEW_ERROR_UPDATE_FAILED",
                                                                                @"Error message shown when a "
                                                                                @"profile update fails.")];
-                                                        }];
-                             }];
-                     }];
+                                  }];
+                              });
+                          }];
+                  }];
 }
 
 - (NSString *)normalizedProfileName
@@ -418,11 +417,15 @@ NSString *const kProfileView_LastPresentedDate = @"kProfileView_LastPresentedDat
 
 - (void)updateProfileCompleted
 {
+    OWSLogVerbose(@"");
+
     [self profileCompletedOrSkipped];
 }
 
 - (void)profileCompletedOrSkipped
 {
+    OWSLogVerbose(@"");
+
     // Dismiss this view.
     switch (self.profileViewMode) {
         case ProfileViewMode_AppSettings:
@@ -439,12 +442,10 @@ NSString *const kProfileView_LastPresentedDate = @"kProfileView_LastPresentedDat
 
 - (void)showHomeView
 {
-    HomeViewController *homeView = [HomeViewController new];
-    SignalsNavigationController *navigationController =
-        [[SignalsNavigationController alloc] initWithRootViewController:homeView];
-    AppDelegate *appDelegate = (AppDelegate *)[UIApplication sharedApplication].delegate;
-    appDelegate.window.rootViewController = navigationController;
-    OWSAssertDebug([navigationController.topViewController isKindOfClass:[HomeViewController class]]);
+    OWSAssertIsOnMainThread();
+    OWSLogVerbose(@"");
+
+    [SignalApp.sharedApp showHomeView];
 }
 
 #pragma mark - UITextFieldDelegate
@@ -486,12 +487,15 @@ NSString *const kProfileView_LastPresentedDate = @"kProfileView_LastPresentedDat
     [self updateAvatarView];
 }
 
+- (NSUInteger)avatarSize
+{
+    return 48;
+}
+
 - (void)updateAvatarView
 {
     self.avatarView.image = (self.avatar
-            ?: [[UIImage imageNamed:@"profile_avatar_default"]
-                   imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate]);
-    self.avatarView.tintColor = (self.avatar ? nil : Theme.middleGrayColor);
+            ?: [[[OWSContactAvatarBuilder alloc] initForLocalUserWithDiameter:self.avatarSize] buildDefaultImage]);
     self.cameraImageView.hidden = self.avatar != nil;
 }
 

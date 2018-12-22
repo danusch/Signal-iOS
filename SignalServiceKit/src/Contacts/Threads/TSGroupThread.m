@@ -3,8 +3,8 @@
 //
 
 #import "TSGroupThread.h"
-#import "NSData+OWS.h"
 #import "TSAttachmentStream.h"
+#import <SignalCoreKit/NSData+OWS.h>
 #import <SignalServiceKit/TSAccountManager.h>
 #import <YapDatabase/YapDatabaseConnection.h>
 #import <YapDatabase/YapDatabaseTransaction.h>
@@ -173,6 +173,16 @@ NSString *const TSGroupThread_NotificationKey_UniqueId = @"TSGroupThread_Notific
     return true;
 }
 
+- (BOOL)isLocalUserInGroup
+{
+    NSString *_Nullable localNumber = TSAccountManager.localNumber;
+    if (localNumber == nil) {
+        return NO;
+    }
+
+    return [self.groupModel.groupMemberIds containsObject:localNumber];
+}
+
 - (NSString *)name
 {
     // TODO sometimes groupName is set to the empty string. I'm hesitent to change
@@ -200,6 +210,13 @@ NSString *const TSGroupThread_NotificationKey_UniqueId = @"TSGroupThread_Notific
     [newGroupMemberIds removeObject:[TSAccountManager localNumber]];
 
     self.groupModel.groupMemberIds = newGroupMemberIds;
+    [self saveWithTransaction:transaction];
+}
+
+- (void)softDeleteGroupThreadWithTransaction:(YapDatabaseReadWriteTransaction *)transaction
+{
+    [self removeAllThreadInteractionsWithTransaction:transaction];
+    self.shouldThreadBeVisible = NO;
     [self saveWithTransaction:transaction];
 }
 
@@ -240,6 +257,13 @@ NSString *const TSGroupThread_NotificationKey_UniqueId = @"TSGroupThread_Notific
     [[NSNotificationCenter defaultCenter] postNotificationName:TSGroupThreadAvatarChangedNotification
                                                         object:self.uniqueId
                                                       userInfo:userInfo];
+}
+
++ (ConversationColorName)defaultConversationColorNameForGroupId:(NSData *)groupId
+{
+    OWSAssertDebug(groupId.length > 0);
+
+    return [self.class stableColorNameForNewConversationWithString:[self threadIdFromGroupId:groupId]];
 }
 
 @end

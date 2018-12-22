@@ -4,12 +4,13 @@
 
 #import "TSPreKeyManager.h"
 #import "AppContext.h"
-#import "NSDate+OWS.h"
 #import "NSURLSessionDataTask+StatusCode.h"
 #import "OWSIdentityManager.h"
 #import "OWSPrimaryStorage+SignedPreKeyStore.h"
+#import "SSKEnvironment.h"
 #import "TSNetworkManager.h"
 #import "TSStorageHeaders.h"
+#import <SignalCoreKit/NSDate+OWS.h>
 #import <SignalServiceKit/SignalServiceKit-Swift.h>
 
 // Time before deletion of signed prekeys (measured in seconds)
@@ -35,6 +36,15 @@ static const NSUInteger kMaxPrekeyUpdateFailureCount = 5;
 #pragma mark -
 
 @implementation TSPreKeyManager
+
+#pragma mark - Dependencies
+
++ (TSAccountManager *)tsAccountManager
+{
+    OWSAssertDebug(SSKEnvironment.shared.tsAccountManager);
+    
+    return SSKEnvironment.shared.tsAccountManager;
+}
 
 #pragma mark - State Tracking
 
@@ -102,7 +112,7 @@ static const NSUInteger kMaxPrekeyUpdateFailureCount = 5;
     }
     OWSAssertDebug(CurrentAppContext().isMainAppAndActive);
 
-    if (!TSAccountManager.isRegistered) {
+    if (!self.tsAccountManager.isRegistered) {
         return;
     }
 

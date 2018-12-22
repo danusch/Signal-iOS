@@ -5,18 +5,22 @@
 #import "ContactDiscoveryService.h"
 #import "CDSQuote.h"
 #import "CDSSigningCertificate.h"
-#import "Cryptography.h"
-#import "NSData+OWS.h"
-#import "NSDate+OWS.h"
+#import "NSError+MessageSending.h"
 #import "OWSError.h"
 #import "OWSRequestFactory.h"
+#import "SSKEnvironment.h"
 #import "TSNetworkManager.h"
 #import <Curve25519Kit/Curve25519.h>
 #import <HKDFKit/HKDFKit.h>
+#import <SignalCoreKit/Cryptography.h>
+#import <SignalCoreKit/NSData+OWS.h>
+#import <SignalCoreKit/NSDate+OWS.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
-@interface RemoteAttestationAuth : NSObject
+NSErrorDomain const ContactDiscoveryServiceErrorDomain = @"SignalServiceKit.ContactDiscoveryService";
+
+@interface RemoteAttestationAuth ()
 
 @property (nonatomic) NSString *username;
 @property (nonatomic) NSString *password;
@@ -79,9 +83,9 @@ NS_ASSUME_NONNULL_BEGIN
     NSData *ephemeralToStatic;
     @try {
         ephemeralToEphemeral =
-            [Curve25519 generateSharedSecretFromPublicKey:self.serverEphemeralPublic andKeyPair:self.keyPair];
+            [Curve25519 throws_generateSharedSecretFromPublicKey:self.serverEphemeralPublic andKeyPair:self.keyPair];
         ephemeralToStatic =
-            [Curve25519 generateSharedSecretFromPublicKey:self.serverStaticPublic andKeyPair:self.keyPair];
+            [Curve25519 throws_generateSharedSecretFromPublicKey:self.serverStaticPublic andKeyPair:self.keyPair];
     } @catch (NSException *exception) {
         OWSFailDebug(@"could not generate shared secrets: %@", exception);
         return NO;
@@ -97,7 +101,7 @@ NS_ASSUME_NONNULL_BEGIN
     NSData *_Nullable derivedMaterial;
     @try {
         derivedMaterial =
-            [HKDFKit deriveKey:masterSecret info:nil salt:publicKeys outputSize:(int)kAES256_KeyByteLength * 2];
+            [HKDFKit throws_deriveKey:masterSecret info:nil salt:publicKeys outputSize:(int)kAES256_KeyByteLength * 2];
     } @catch (NSException *exception) {
         OWSFailDebug(@"could not derive service key: %@", exception);
         return NO;
@@ -152,16 +156,6 @@ NS_ASSUME_NONNULL_BEGIN
 
 @implementation RemoteAttestation
 
-- (NSString *)authUsername
-{
-    return self.auth.username;
-}
-
-- (NSString *)password
-{
-    return self.auth.password;
-}
-
 @end
 
 #pragma mark -
@@ -171,6 +165,7 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic) NSData *isvEnclaveQuoteBody;
 @property (nonatomic) NSString *isvEnclaveQuoteStatus;
 @property (nonatomic) NSString *timestamp;
+@property (nonatomic) NSNumber *version;
 
 @end
 
@@ -198,6 +193,16 @@ NS_ASSUME_NONNULL_BEGIN
         return nil;
     }
     return valueString;
+}
+
+- (nullable NSNumber *)numberForKey:(NSString *)key
+{
+    NSNumber *_Nullable value = self[key];
+    if (![value isKindOfClass:[NSNumber class]]) {
+        OWSFailDebug(@"couldn't parse number for key: %@", key);
+        return nil;
+    }
+    return value;
 }
 
 - (nullable NSData *)base64DataForKey:(NSString *)key
@@ -237,15 +242,12 @@ NS_ASSUME_NONNULL_BEGIN
 
 @implementation ContactDiscoveryService
 
-+ (instancetype)sharedService {
-    static dispatch_once_t onceToken;
-    static id sharedInstance = nil;
-    dispatch_once(&onceToken, ^{
-        sharedInstance = [[ContactDiscoveryService alloc] initDefault];
-    });
-    return sharedInstance;
-}
++ (instancetype)shared
+{
+    OWSAssertDebug(SSKEnvironment.shared.contactDiscoveryService);
 
+    return SSKEnvironment.shared.contactDiscoveryService;
+}
 
 - (instancetype)initDefault
 {
@@ -338,7 +340,6 @@ NS_ASSUME_NONNULL_BEGIN
 {
     ECKeyPair *keyPair = [Curve25519 generateKeyPair];
 
-    // TODO:
     NSString *enclaveId = @"cd6cfc342937b23b1bdd3bbf9721aa5615ac9ff50a75c5527d441cd3276826c9";
 
     TSRequest *request = [OWSRequestFactory remoteAttestationRequest:keyPair
@@ -356,7 +357,10 @@ NS_ASSUME_NONNULL_BEGIN
                                                                                          auth:auth];
 
                 if (!attestation) {
-                    NSError *error = OWSErrorMakeUnableToProcessServerResponseError();
+                    NSError *error = [NSError errorWithDomain:ContactDiscoveryServiceErrorDomain
+                                                         code:ContactDiscoveryServiceErrorAttestationFailed
+                                                     userInfo:nil];
+                    error.isRetryable = NO;
                     failureHandler(error);
                     return;
                 }
@@ -365,8 +369,6 @@ NS_ASSUME_NONNULL_BEGIN
             });
         }
         failure:^(NSURLSessionDataTask *task, NSError *error) {
-            NSHTTPURLResponse *response = (NSHTTPURLResponse *)task.response;
-            OWSLogVerbose(@"remote attestation failure: %lu", (unsigned long)response.statusCode);
             failureHandler(error);
         }];
 }
@@ -507,7 +509,14 @@ NS_ASSUME_NONNULL_BEGIN
     OWSAssertDebug(signature.length > 0);
     OWSAssertDebug(quoteData);
 
-    CDSSigningCertificate *_Nullable certificate = [CDSSigningCertificate parseCertificateFromPem:certificates];
+    NSError *error;
+    CDSSigningCertificate *_Nullable certificate =
+        [CDSSigningCertificate parseCertificateFromPem:certificates error:&error];
+    if (error) {
+        OWSFailDebug(@"error when parsing signing certificate. %@", error.localizedDescription);
+        return NO;
+    }
+
     if (!certificate) {
         OWSFailDebug(@"could not parse signing certificate.");
         return NO;
@@ -529,6 +538,12 @@ NS_ASSUME_NONNULL_BEGIN
         OWSFailDebug(@"isvEnclaveQuoteBody has unexpected length.");
         return NO;
     }
+    // NOTE: This version is separate from and does _NOT_ match the CDS quote version.
+    const NSUInteger kSignatureBodyVersion = 3;
+    if (![signatureBodyEntity.version isEqual:@(kSignatureBodyVersion)]) {
+        OWSFailDebug(@"signatureBodyEntity has unexpected version.");
+        return NO;
+    }
     if (quoteData.length < kQuoteBodyComparisonLength) {
         OWSFailDebug(@"quoteData has unexpected length.");
         return NO;
@@ -541,9 +556,7 @@ NS_ASSUME_NONNULL_BEGIN
         return NO;
     }
 
-    // TODO: Before going to production, remove GROUP_OUT_OF_DATE.
-    if (![@"OK" isEqualToString:signatureBodyEntity.isvEnclaveQuoteStatus]
-        && ![@"GROUP_OUT_OF_DATE" isEqualToString:signatureBodyEntity.isvEnclaveQuoteStatus]) {
+    if (![@"OK" isEqualToString:signatureBodyEntity.isvEnclaveQuoteStatus]) {
         OWSFailDebug(@"invalid isvEnclaveQuoteStatus: %@.", signatureBodyEntity.isvEnclaveQuoteStatus);
         return NO;
     }
@@ -603,11 +616,17 @@ NS_ASSUME_NONNULL_BEGIN
         OWSFailDebug(@"could not parse signature isvEnclaveQuoteStatus.");
         return nil;
     }
+    NSNumber *_Nullable version = [jsonDict numberForKey:@"version"];
+    if (!version) {
+        OWSFailDebug(@"could not parse signature version.");
+        return nil;
+    }
 
     SignatureBodyEntity *result = [SignatureBodyEntity new];
     result.isvEnclaveQuoteBody = isvEnclaveQuoteBody;
     result.isvEnclaveQuoteStatus = isvEnclaveQuoteStatus;
     result.timestamp = timestamp;
+    result.version = version;
     return result;
 }
 
@@ -643,8 +662,7 @@ NS_ASSUME_NONNULL_BEGIN
         OWSFailDebug(@"enclave ids do not match.");
         return NO;
     }
-    // TODO: Reverse this condition in production.
-    if (!quote.isDebugQuote) {
+    if (quote.isDebugQuote) {
         OWSFailDebug(@"quote has invalid isDebugQuote value.");
         return NO;
     }

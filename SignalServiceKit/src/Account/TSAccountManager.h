@@ -9,12 +9,20 @@ NS_ASSUME_NONNULL_BEGIN
 extern NSString *const TSRegistrationErrorDomain;
 extern NSString *const TSRegistrationErrorUserInfoHTTPStatus;
 extern NSString *const RegistrationStateDidChangeNotification;
-extern NSString *const DeregistrationStateDidChangeNotification;
 extern NSString *const kNSNotificationName_LocalNumberDidChange;
 
+@class AnyPromise;
 @class OWSPrimaryStorage;
 @class TSNetworkManager;
 @class YapDatabaseReadWriteTransaction;
+
+typedef NS_ENUM(NSUInteger, OWSRegistrationState) {
+    OWSRegistrationState_Unregistered,
+    OWSRegistrationState_PendingBackupRestore,
+    OWSRegistrationState_Registered,
+    OWSRegistrationState_Deregistered,
+    OWSRegistrationState_Reregistering,
+};
 
 @interface TSAccountManager : NSObject
 
@@ -27,20 +35,19 @@ extern NSString *const kNSNotificationName_LocalNumberDidChange;
 
 - (instancetype)init NS_UNAVAILABLE;
 
-- (instancetype)initWithNetworkManager:(TSNetworkManager *)networkManager
-                        primaryStorage:(OWSPrimaryStorage *)primaryStorage NS_DESIGNATED_INITIALIZER;
+- (instancetype)initWithPrimaryStorage:(OWSPrimaryStorage *)primaryStorage NS_DESIGNATED_INITIALIZER;
 
 + (instancetype)sharedInstance;
 
-@property (nonatomic, strong, readonly) TSNetworkManager *networkManager;
+- (OWSRegistrationState)registrationState;
 
 /**
  *  Returns if a user is registered or not
  *
  *  @return registered or not
  */
-+ (BOOL)isRegistered;
 - (BOOL)isRegistered;
+- (BOOL)isRegisteredAndReady;
 
 /**
  *  Returns current phone number for this device, which may not yet have been registered.
@@ -72,27 +79,25 @@ extern NSString *const kNSNotificationName_LocalNumberDidChange;
  *  @return registrationID;
  */
 
-+ (uint32_t)getOrGenerateRegistrationId;
 + (uint32_t)getOrGenerateRegistrationId:(YapDatabaseReadWriteTransaction *)transaction;
+- (uint32_t)getOrGenerateRegistrationId;
+- (uint32_t)getOrGenerateRegistrationId:(YapDatabaseReadWriteTransaction *)transaction;
 
 #pragma mark - Register with phone number
 
-+ (void)registerWithPhoneNumber:(NSString *)phoneNumber
+- (void)registerWithPhoneNumber:(NSString *)phoneNumber
                         success:(void (^)(void))successBlock
                         failure:(void (^)(NSError *error))failureBlock
                 smsVerification:(BOOL)isSMS;
 
-+ (void)rerequestSMSWithSuccess:(void (^)(void))successBlock failure:(void (^)(NSError *error))failureBlock;
+- (void)rerequestSMSWithSuccess:(void (^)(void))successBlock failure:(void (^)(NSError *error))failureBlock;
 
-+ (void)rerequestVoiceWithSuccess:(void (^)(void))successBlock failure:(void (^)(NSError *error))failureBlock;
+- (void)rerequestVoiceWithSuccess:(void (^)(void))successBlock failure:(void (^)(NSError *error))failureBlock;
 
 - (void)verifyAccountWithCode:(NSString *)verificationCode
                           pin:(nullable NSString *)pin
                       success:(void (^)(void))successBlock
                       failure:(void (^)(NSError *error))failureBlock;
-
-- (void)registerForManualMessageFetchingWithSuccess:(void (^)(void))successBlock
-                                            failure:(void (^)(NSError *error))failureBlock;
 
 // Called once registration is complete - meaning the following have succeeded:
 // - obtained signal server credentials
@@ -128,6 +133,9 @@ extern NSString *const kNSNotificationName_LocalNumberDidChange;
 - (BOOL)isDeregistered;
 - (void)setIsDeregistered:(BOOL)isDeregistered;
 
+- (BOOL)hasPendingBackupRestoreDecision;
+- (void)setHasPendingBackupRestoreDecision:(BOOL)value;
+
 #pragma mark - Re-registration
 
 // Re-registration is the process of re-registering _with the same phone number_.
@@ -136,6 +144,20 @@ extern NSString *const kNSNotificationName_LocalNumberDidChange;
 - (BOOL)resetForReregistration;
 - (NSString *)reregisterationPhoneNumber;
 - (BOOL)isReregistering;
+
+#pragma mark - Manual Message Fetch
+
+- (BOOL)isManualMessageFetchEnabled;
+- (AnyPromise *)setIsManualMessageFetchEnabled:(BOOL)value __attribute__((warn_unused_result));
+
+#ifdef DEBUG
+- (void)registerForTestsWithLocalNumber:(NSString *)localNumber;
+#endif
+
+- (AnyPromise *)updateAccountAttributes __attribute__((warn_unused_result));
+
+// This should only be used during the registration process.
+- (AnyPromise *)performUpdateAccountAttributes __attribute__((warn_unused_result));
 
 @end
 

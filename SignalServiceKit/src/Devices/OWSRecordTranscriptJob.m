@@ -3,7 +3,7 @@
 //
 
 #import "OWSRecordTranscriptJob.h"
-#import "OWSAttachmentsProcessor.h"
+#import "OWSAttachmentDownloads.h"
 #import "OWSDisappearingMessagesJob.h"
 #import "OWSIncomingSentMessageTranscript.h"
 #import "OWSPrimaryStorage+SessionStore.h"
@@ -14,36 +14,21 @@
 #import "TSNetworkManager.h"
 #import "TSOutgoingMessage.h"
 #import "TSQuotedMessage.h"
+#import "TSThread.h"
 
 NS_ASSUME_NONNULL_BEGIN
 
 @interface OWSRecordTranscriptJob ()
 
-@property (nonatomic, readonly) TSNetworkManager *networkManager;
-@property (nonatomic, readonly) OWSPrimaryStorage *primaryStorage;
-@property (nonatomic, readonly) OWSReadReceiptManager *readReceiptManager;
-@property (nonatomic, readonly) id<ContactsManagerProtocol> contactsManager;
-
 @property (nonatomic, readonly) OWSIncomingSentMessageTranscript *incomingSentMessageTranscript;
 
 @end
 
+#pragma mark -
+
 @implementation OWSRecordTranscriptJob
 
 - (instancetype)initWithIncomingSentMessageTranscript:(OWSIncomingSentMessageTranscript *)incomingSentMessageTranscript
-{
-    return [self initWithIncomingSentMessageTranscript:incomingSentMessageTranscript
-                                        networkManager:TSNetworkManager.sharedManager
-                                        primaryStorage:OWSPrimaryStorage.sharedManager
-                                    readReceiptManager:OWSReadReceiptManager.sharedManager
-                                       contactsManager:SSKEnvironment.shared.contactsManager];
-}
-
-- (instancetype)initWithIncomingSentMessageTranscript:(OWSIncomingSentMessageTranscript *)incomingSentMessageTranscript
-                                       networkManager:(TSNetworkManager *)networkManager
-                                       primaryStorage:(OWSPrimaryStorage *)primaryStorage
-                                   readReceiptManager:(OWSReadReceiptManager *)readReceiptManager
-                                      contactsManager:(id<ContactsManagerProtocol>)contactsManager
 {
     self = [super init];
     if (!self) {
@@ -51,21 +36,54 @@ NS_ASSUME_NONNULL_BEGIN
     }
 
     _incomingSentMessageTranscript = incomingSentMessageTranscript;
-    _networkManager = networkManager;
-    _primaryStorage = primaryStorage;
-    _readReceiptManager = readReceiptManager;
-    _contactsManager = contactsManager;
 
     return self;
 }
 
-- (void)runWithAttachmentHandler:(void (^)(TSAttachmentStream *attachmentStream))attachmentHandler
+#pragma mark - Dependencies
+
+- (OWSPrimaryStorage *)primaryStorage
+{
+    OWSAssertDebug(SSKEnvironment.shared.primaryStorage);
+
+    return SSKEnvironment.shared.primaryStorage;
+}
+
+- (TSNetworkManager *)networkManager
+{
+    OWSAssertDebug(SSKEnvironment.shared.networkManager);
+
+    return SSKEnvironment.shared.networkManager;
+}
+
+- (OWSReadReceiptManager *)readReceiptManager
+{
+    OWSAssert(SSKEnvironment.shared.readReceiptManager);
+
+    return SSKEnvironment.shared.readReceiptManager;
+}
+
+- (id<ContactsManagerProtocol>)contactsManager
+{
+    OWSAssertDebug(SSKEnvironment.shared.contactsManager);
+
+    return SSKEnvironment.shared.contactsManager;
+}
+
+- (OWSAttachmentDownloads *)attachmentDownloads
+{
+    return SSKEnvironment.shared.attachmentDownloads;
+}
+
+#pragma mark -
+
+- (void)runWithAttachmentHandler:(void (^)(NSArray<TSAttachmentStream *> *attachmentStreams))attachmentHandler
                      transaction:(YapDatabaseReadWriteTransaction *)transaction
 {
     OWSAssertDebug(transaction);
 
     OWSIncomingSentMessageTranscript *transcript = self.incomingSentMessageTranscript;
-    OWSLogDebug(@"Recording transcript: %@", transcript);
+    OWSLogInfo(@"Recording transcript in thread: %@ timestamp: %llu", transcript.thread.uniqueId, transcript.timestamp);
 
     if (transcript.isEndSessionMessage) {
         OWSLogInfo(@"EndSession was sent to recipient: %@.", transcript.recipientId);
@@ -78,24 +96,26 @@ NS_ASSUME_NONNULL_BEGIN
         return;
     }
 
-    OWSAttachmentsProcessor *attachmentsProcessor =
-        [[OWSAttachmentsProcessor alloc] initWithAttachmentProtos:transcript.attachmentPointerProtos
-                                                   networkManager:self.networkManager
-                                                      transaction:transaction];
-
-
     // TODO group updates. Currently desktop doesn't support group updates, so not a problem yet.
     TSOutgoingMessage *outgoingMessage =
         [[TSOutgoingMessage alloc] initOutgoingMessageWithTimestamp:transcript.timestamp
                                                            inThread:transcript.thread
                                                         messageBody:transcript.body
-                                                      attachmentIds:[attachmentsProcessor.attachmentIds mutableCopy]
+                                                      attachmentIds:[NSMutableArray new]
                                                    expiresInSeconds:transcript.expirationDuration
                                                     expireStartedAt:transcript.expirationStartedAt
                                                      isVoiceMessage:NO
                                                    groupMetaMessage:TSGroupMetaMessageUnspecified
                                                       quotedMessage:transcript.quotedMessage
                                                        contactShare:transcript.contact];
+
+    NSArray<TSAttachmentPointer *> *attachmentPointers =
+        [TSAttachmentPointer attachmentPointersFromProtos:transcript.attachmentPointerProtos
+                                             albumMessage:outgoingMessage];
+    for (TSAttachmentPointer *pointer in attachmentPointers) {
+        [pointer saveWithTransaction:transaction];
+        [outgoingMessage.attachmentIds addObject:pointer.uniqueId];
+    }
 
     TSQuotedMessage *_Nullable quotedMessage = transcript.quotedMessage;
     if (quotedMessage && quotedMessage.thumbnailAttachmentPointerId) {
@@ -105,21 +125,19 @@ NS_ASSUME_NONNULL_BEGIN
                                              transaction:transaction];
 
         if ([attachmentPointer isKindOfClass:[TSAttachmentPointer class]]) {
-            OWSAttachmentsProcessor *attachmentProcessor =
-                [[OWSAttachmentsProcessor alloc] initWithAttachmentPointer:attachmentPointer
-                                                            networkManager:self.networkManager];
+            OWSLogDebug(@"downloading attachments for transcript: %lu", (unsigned long)transcript.timestamp);
 
-            OWSLogDebug(@"downloading thumbnail for transcript: %lu", (unsigned long)transcript.timestamp);
-            [attachmentProcessor fetchAttachmentsForMessage:outgoingMessage
-                transaction:transaction
-                success:^(TSAttachmentStream *_Nonnull attachmentStream) {
+            [self.attachmentDownloads downloadAttachmentPointer:attachmentPointer
+                success:^(NSArray<TSAttachmentStream *> *attachmentStreams) {
+                    OWSAssertDebug(attachmentStreams.count == 1);
+                    TSAttachmentStream *attachmentStream = attachmentStreams.firstObject;
                     [self.primaryStorage.newDatabaseConnection
-                        asyncReadWriteWithBlock:^(YapDatabaseReadWriteTransaction *_Nonnull transaction) {
+                        readWriteWithBlock:^(YapDatabaseReadWriteTransaction *transaction) {
                             [outgoingMessage setQuotedMessageThumbnailAttachmentStream:attachmentStream];
                             [outgoingMessage saveWithTransaction:transaction];
                         }];
                 }
-                failure:^(NSError *_Nonnull error) {
+                failure:^(NSError *error) {
                     OWSLogWarn(@"failed to fetch thumbnail for transcript: %lu with error: %@",
                         (unsigned long)transcript.timestamp,
                         error);
@@ -146,7 +164,9 @@ NS_ASSUME_NONNULL_BEGIN
     }
 
     [outgoingMessage saveWithTransaction:transaction];
-    [outgoingMessage updateWithWasSentFromLinkedDeviceWithTransaction:transaction];
+    [outgoingMessage updateWithWasSentFromLinkedDeviceWithUDRecipientIds:transcript.udRecipientIds
+                                                       nonUdRecipientIds:transcript.nonUdRecipientIds
+                                                             transaction:transaction];
     [[OWSDisappearingMessagesJob sharedJob] becomeConsistentWithConfigurationForMessage:outgoingMessage
                                                                         contactsManager:self.contactsManager
                                                                             transaction:transaction];
@@ -156,13 +176,16 @@ NS_ASSUME_NONNULL_BEGIN
     [self.readReceiptManager applyEarlyReadReceiptsForOutgoingMessageFromLinkedDevice:outgoingMessage
                                                                           transaction:transaction];
 
-    [attachmentsProcessor
-        fetchAttachmentsForMessage:outgoingMessage
-                       transaction:transaction
-                           success:attachmentHandler
-                           failure:^(NSError *_Nonnull error) {
-                               OWSLogError(@"failed to fetch transcripts attachments for message: %@", outgoingMessage);
-                           }];
+    if (outgoingMessage.hasAttachments) {
+        [self.attachmentDownloads
+            downloadAttachmentsForMessage:outgoingMessage
+                              transaction:transaction
+                                  success:attachmentHandler
+                                  failure:^(NSError *error) {
+                                      OWSLogError(
+                                          @"failed to fetch transcripts attachments for message: %@", outgoingMessage);
+                                  }];
+    }
 }
 
 @end

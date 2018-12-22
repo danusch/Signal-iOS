@@ -62,6 +62,8 @@ typedef NS_ENUM(NSInteger, TSGroupMetaMessage) {
 // This property should only be set if state == .sent.
 @property (atomic, nullable, readonly) NSNumber *readTimestamp;
 
+@property (atomic, readonly) BOOL wasSentByUD;
+
 @end
 
 #pragma mark -
@@ -111,6 +113,7 @@ typedef NS_ENUM(NSInteger, TSGroupMetaMessage) {
 
 @property (readonly) TSOutgoingMessageState messageState;
 @property (readonly) BOOL wasDeliveredToAnyRecipient;
+@property (readonly) BOOL wasSentToAnyRecipient;
 
 @property (atomic, readonly) BOOL hasSyncedTranscript;
 @property (atomic, readonly) NSString *customMessage;
@@ -126,6 +129,8 @@ typedef NS_ENUM(NSInteger, TSGroupMetaMessage) {
 @property (atomic, readonly) BOOL isFromLinkedDevice;
 
 @property (nonatomic, readonly) BOOL isSilent;
+
+@property (nonatomic, readonly) BOOL isOnline;
 
 /**
  * The data representation of this message, to be encrypted, before being sent.
@@ -153,7 +158,10 @@ typedef NS_ENUM(NSInteger, TSGroupMetaMessage) {
 // All recipients of this message who we are currently trying to send to (queued, uploading or during send).
 - (NSArray<NSString *> *)sendingRecipientIds;
 
-// All recipients of this message to whom it has been sent and delivered.
+// All recipients of this message to whom it has been sent (and possibly delivered or read).
+- (NSArray<NSString *> *)sentRecipientIds;
+
+// All recipients of this message to whom it has been sent and delivered (and possibly read).
 - (NSArray<NSString *> *)deliveredRecipientIds;
 
 // All recipients of this message to whom it has been sent, delivered and read.
@@ -167,7 +175,9 @@ typedef NS_ENUM(NSInteger, TSGroupMetaMessage) {
 #pragma mark - Update With... Methods
 
 // This method is used to record a successful send to one recipient.
-- (void)updateWithSentRecipient:(NSString *)recipientId transaction:(YapDatabaseReadWriteTransaction *)transaction;
+- (void)updateWithSentRecipient:(NSString *)recipientId
+                    wasSentByUD:(BOOL)wasSentByUD
+                    transaction:(YapDatabaseReadWriteTransaction *)transaction;
 
 // This method is used to record a skipped send to one recipient.
 - (void)updateWithSkippedRecipient:(NSString *)recipientId transaction:(YapDatabaseReadWriteTransaction *)transaction;
@@ -185,7 +195,9 @@ typedef NS_ENUM(NSInteger, TSGroupMetaMessage) {
                        transaction:(YapDatabaseReadWriteTransaction *)transaction;
 
 // This method is used to record a failed send to all "sending" recipients.
-- (void)updateWithSendingError:(NSError *)error;
+- (void)updateWithSendingError:(NSError *)error
+                   transaction:(YapDatabaseReadWriteTransaction *)transaction
+    NS_SWIFT_NAME(update(sendingError:transaction:));
 
 - (void)updateWithHasSyncedTranscript:(BOOL)hasSyncedTranscript
                           transaction:(YapDatabaseReadWriteTransaction *)transaction;
@@ -202,7 +214,9 @@ typedef NS_ENUM(NSInteger, TSGroupMetaMessage) {
                    deliveryTimestamp:(NSNumber *_Nullable)deliveryTimestamp
                          transaction:(YapDatabaseReadWriteTransaction *)transaction;
 
-- (void)updateWithWasSentFromLinkedDeviceWithTransaction:(YapDatabaseReadWriteTransaction *)transaction;
+- (void)updateWithWasSentFromLinkedDeviceWithUDRecipientIds:(nullable NSArray<NSString *> *)udRecipientIds
+                                          nonUdRecipientIds:(nullable NSArray<NSString *> *)nonUdRecipientIds
+                                                transaction:(YapDatabaseReadWriteTransaction *)transaction;
 
 // This method is used to rewrite the recipient list with a single recipient.
 // It is used to reply to a "group info request", which should only be

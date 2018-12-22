@@ -10,14 +10,30 @@ NS_ASSUME_NONNULL_BEGIN
 @class TSInteraction;
 @class TSInvalidIdentityKeyReceivingErrorMessage;
 
+typedef NSString *ConversationColorName NS_STRING_ENUM;
+
+extern ConversationColorName const ConversationColorNameCrimson;
+extern ConversationColorName const ConversationColorNameVermilion;
+extern ConversationColorName const ConversationColorNameBurlap;
+extern ConversationColorName const ConversationColorNameForest;
+extern ConversationColorName const ConversationColorNameWintergreen;
+extern ConversationColorName const ConversationColorNameTeal;
+extern ConversationColorName const ConversationColorNameBlue;
+extern ConversationColorName const ConversationColorNameIndigo;
+extern ConversationColorName const ConversationColorNameViolet;
+extern ConversationColorName const ConversationColorNamePlum;
+extern ConversationColorName const ConversationColorNameTaupe;
+extern ConversationColorName const ConversationColorNameSteel;
+
+extern ConversationColorName const kConversationColorName_Default;
+
 /**
  *  TSThread is the superclass of TSContactThread and TSGroupThread
  */
-
 @interface TSThread : TSYapDatabaseObject
 
 // YES IFF this thread has ever had a message.
-@property (nonatomic) BOOL hasEverHadMessage;
+@property (nonatomic) BOOL shouldThreadBeVisible;
 
 /**
  *  Whether the object is a group thread or not.
@@ -33,9 +49,12 @@ NS_ASSUME_NONNULL_BEGIN
  */
 - (NSString *)name;
 
-@property (readonly, nullable) NSString *conversationColorName;
-- (void)updateConversationColorName:(NSString *)colorName transaction:(YapDatabaseReadWriteTransaction *)transaction;
-+ (NSString *)stableConversationColorNameForString:(NSString *)colorSeed;
+@property (nonatomic, readonly) ConversationColorName conversationColorName;
+
+- (void)updateConversationColorName:(ConversationColorName)colorName
+                        transaction:(YapDatabaseReadWriteTransaction *)transaction;
++ (ConversationColorName)stableColorNameForNewConversationWithString:(NSString *)colorSeed;
+@property (class, nonatomic, readonly) NSArray<ConversationColorName> *conversationColorNames;
 
 /**
  * @returns

@@ -8,10 +8,12 @@
 // Separate iOS Frameworks from other imports.
 #import "SAEScreenLockViewController.h"
 #import "ShareAppExtensionContext.h"
+#import <SignalCoreKit/NSObject+OWS.h>
+#import <SignalCoreKit/OWSAsserts.h>
+#import <SignalCoreKit/OWSLogs.h>
 #import <SignalMessaging/DebugLogger.h>
 #import <SignalMessaging/Environment.h>
 #import <SignalMessaging/OWSContactsManager.h>
-#import <SignalMessaging/OWSContactsSyncing.h>
 #import <SignalMessaging/OWSMath.h>
 #import <SignalMessaging/OWSPreferences.h>
 #import <SignalMessaging/UIColor+OWS.h>
@@ -21,8 +23,5 @@
 #import <SignalServiceKit/AppContext.h>
 #import <SignalServiceKit/AppReadiness.h>
 #import <SignalServiceKit/AppVersion.h>
-#import <SignalServiceKit/NSObject+OWS.h>
-#import <SignalServiceKit/OWSAsserts.h>
-#import <SignalServiceKit/OWSLogger.h>
 #import <SignalServiceKit/OWSMessageSender.h>
 #import <SignalServiceKit/TSAccountManager.h>

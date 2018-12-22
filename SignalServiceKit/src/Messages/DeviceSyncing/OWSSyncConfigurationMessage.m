@@ -10,19 +10,24 @@ NS_ASSUME_NONNULL_BEGIN
 @interface OWSSyncConfigurationMessage ()
 
 @property (nonatomic, readonly) BOOL areReadReceiptsEnabled;
+@property (nonatomic, readonly) BOOL showUnidentifiedDeliveryIndicators;
+@property (nonatomic, readonly) BOOL showTypingIndicators;
 
 @end
 
 @implementation OWSSyncConfigurationMessage
 
 - (instancetype)initWithReadReceiptsEnabled:(BOOL)areReadReceiptsEnabled
-{
+         showUnidentifiedDeliveryIndicators:(BOOL)showUnidentifiedDeliveryIndicators
+                       showTypingIndicators:(BOOL)showTypingIndicators {
     self = [super init];
     if (!self) {
         return nil;
     }
 
     _areReadReceiptsEnabled = areReadReceiptsEnabled;
+    _showUnidentifiedDeliveryIndicators = showUnidentifiedDeliveryIndicators;
+    _showTypingIndicators = showTypingIndicators;
 
     return self;
 }
@@ -34,9 +39,10 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (nullable SSKProtoSyncMessageBuilder *)syncMessageBuilder
 {
-    SSKProtoSyncMessageConfigurationBuilder *configurationBuilder =
-        [SSKProtoSyncMessageConfigurationBuilder new];
+    SSKProtoSyncMessageConfigurationBuilder *configurationBuilder = [SSKProtoSyncMessageConfiguration builder];
     configurationBuilder.readReceipts = self.areReadReceiptsEnabled;
+    configurationBuilder.unidentifiedDeliveryIndicators = self.showUnidentifiedDeliveryIndicators;
+    configurationBuilder.typingIndicators = self.showTypingIndicators;
 
     NSError *error;
     SSKProtoSyncMessageConfiguration *_Nullable configurationProto = [configurationBuilder buildAndReturnError:&error];
@@ -45,7 +51,7 @@ NS_ASSUME_NONNULL_BEGIN
         return nil;
     }
 
-    SSKProtoSyncMessageBuilder *builder = [SSKProtoSyncMessageBuilder new];
+    SSKProtoSyncMessageBuilder *builder = [SSKProtoSyncMessage builder];
     builder.configuration = configurationProto;
     return builder;
 }

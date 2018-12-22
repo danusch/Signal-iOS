@@ -8,10 +8,10 @@
 #import "Signal-Swift.h"
 #import "SignalApp.h"
 #import "ThreadUtil.h"
+#import <SignalCoreKit/NSDate+OWS.h>
+#import <SignalCoreKit/NSString+SSK.h>
 #import <SignalMessaging/OWSContactsManager.h>
 #import <SignalServiceKit/AppReadiness.h>
-#import <SignalServiceKit/NSDate+OWS.h>
-#import <SignalServiceKit/NSString+SSK.h>
 #import <SignalServiceKit/OWSDevice.h>
 #import <SignalServiceKit/OWSMessageSender.h>
 #import <SignalServiceKit/OWSReadReceiptManager.h>
@@ -35,47 +35,26 @@ NSString *const Signal_Message_MarkAsRead_Identifier = @"Signal_Message_MarkAsRe
 
 @property (nonatomic) NSMutableArray *currentNotifications;
 @property (nonatomic) UIBackgroundTaskIdentifier callBackgroundTask;
-@property (nonatomic, readonly) OWSMessageSender *messageSender;
-@property (nonatomic, readonly) OWSMessageFetcherJob *messageFetcherJob;
-@property (nonatomic, readonly) NotificationsManager *notificationsManager;
 
 @end
 
 @implementation PushManager
 
 + (instancetype)sharedManager {
-    static PushManager *sharedManager = nil;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        sharedManager = [[self alloc] initDefault];
-    });
-    return sharedManager;
+    OWSAssertDebug(AppEnvironment.shared.pushManager);
+
+    return AppEnvironment.shared.pushManager;
 }
 
-- (instancetype)initDefault
-{
-    return [self initWithMessageFetcherJob:SignalApp.sharedApp.messageFetcherJob
-                            primaryStorage:[OWSPrimaryStorage sharedManager]
-                             messageSender:SSKEnvironment.shared.messageSender
-                      notificationsManager:SignalApp.sharedApp.notificationsManager];
-}
-
-- (instancetype)initWithMessageFetcherJob:(OWSMessageFetcherJob *)messageFetcherJob
-                           primaryStorage:(OWSPrimaryStorage *)primaryStorage
-                            messageSender:(OWSMessageSender *)messageSender
-                     notificationsManager:(NotificationsManager *)notificationsManager
-{
+- (instancetype)init {
     self = [super init];
     if (!self) {
         return self;
     }
 
-    _messageSender = messageSender;
-    _messageFetcherJob = messageFetcherJob;
     _callBackgroundTask = UIBackgroundTaskInvalid;
     // TODO: consolidate notification tracking with NotificationsManager, which also maintains a list of notifications.
     _currentNotifications = [NSMutableArray array];
-    _notificationsManager = notificationsManager;
 
     OWSSingletonAssert();
 
@@ -87,9 +66,25 @@ NSString *const Signal_Message_MarkAsRead_Identifier = @"Signal_Message_MarkAsRe
     return self;
 }
 
+#pragma mark - Dependencies
+
+- (OWSMessageSender *)messageSender {
+    return SSKEnvironment.shared.messageSender;
+}
+
+- (OWSMessageFetcherJob *)messageFetcherJob {
+    return AppEnvironment.shared.messageFetcherJob;
+}
+
+- (id<NotificationsProtocol>)notificationsManager {
+    return SSKEnvironment.shared.notificationsManager;
+}
+
+#pragma mark -
+
 - (CallUIAdapter *)callUIAdapter
 {
-    return SignalApp.sharedApp.callService.callUIAdapter;
+    return AppEnvironment.shared.callService.callUIAdapter;
 }
 
 - (void)handleMessageRead:(NSNotification *)notification
@@ -110,13 +105,13 @@ NSString *const Signal_Message_MarkAsRead_Identifier = @"Signal_Message_MarkAsRe
 {
     OWSLogInfo(@"received remote notification");
 
-    [AppReadiness runNowOrWhenAppIsReady:^{
+    [AppReadiness runNowOrWhenAppDidBecomeReady:^{
         [self.messageFetcherJob run];
     }];
 }
 
 - (void)applicationDidBecomeActive {
-    [AppReadiness runNowOrWhenAppIsReady:^{
+    [AppReadiness runNowOrWhenAppDidBecomeReady:^{
         [self.messageFetcherJob run];
     }];
 }
@@ -135,7 +130,7 @@ NSString *const Signal_Message_MarkAsRead_Identifier = @"Signal_Message_MarkAsRe
     // If we want to re-introduce silent pushes we can remove this assert.
     OWSFailDebug(@"Unexpected content-available push.");
 
-    [AppReadiness runNowOrWhenAppIsReady:^{
+    [AppReadiness runNowOrWhenAppDidBecomeReady:^{
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 20 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
             completionHandler(UIBackgroundFetchResultNewData);
         });
@@ -206,7 +201,10 @@ NSString *const Signal_Message_MarkAsRead_Identifier = @"Signal_Message_MarkAsRe
             NSString *replyText = responseInfo[UIUserNotificationActionResponseTypedTextKey];
 
             // In line with most apps, we send a normal outgoing messgae here - not a "quoted reply".
-            [ThreadUtil sendMessageWithText:replyText
+
+            // We use a non-durable send to delay calling the completion handler until sending completes
+            // in hopes our send will complete before the app gets suspended.
+            [ThreadUtil sendMessageNonDurablyWithText:replyText
                 inThread:thread
                 quotedReplyModel:nil
                 messageSender:self.messageSender

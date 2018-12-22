@@ -2,10 +2,10 @@
 //  Copyright (c) 2018 Open Whisper Systems. All rights reserved.
 //
 
-#import "OWSIncomingMessageFinder.h"
 #import "OWSDevice.h"
+#import "OWSIncomingMessageFinder.h"
 #import "OWSPrimaryStorage.h"
-#import "SSKBaseTest.h"
+#import "SSKBaseTestObjC.h"
 #import "TSContactThread.h"
 #import "TSIncomingMessage.h"
 
@@ -17,7 +17,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 @end
 
-@interface OWSIncomingMessageFinderTest : SSKBaseTest
+@interface OWSIncomingMessageFinderTest : SSKBaseTestObjC
 
 @property (nonatomic) NSString *sourceId;
 @property (nonatomic) TSThread *thread;
@@ -54,7 +54,9 @@ NS_ASSUME_NONNULL_BEGIN
                                                                                        attachmentIds:@[]
                                                                                     expiresInSeconds:0
                                                                                        quotedMessage:nil
-                                                                                        contactShare:nil];
+                                                                                        contactShare:nil
+                                                                                     serverTimestamp:nil
+                                                                                     wasReceivedByUD:NO];
     [incomingMessage save];
 }
 

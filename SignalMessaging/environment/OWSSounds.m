@@ -3,6 +3,7 @@
 //
 
 #import "OWSSounds.h"
+#import "Environment.h"
 #import "OWSAudioPlayer.h"
 #import <SignalMessaging/SignalMessaging-Swift.h>
 #import <SignalServiceKit/OWSFileSystem.h>
@@ -68,19 +69,9 @@ NSString *const kOWSSoundsStorageGlobalNotificationKey = @"kOWSSoundsStorageGlob
 
 + (instancetype)sharedManager
 {
-    static OWSSounds *instance = nil;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        instance = [[self alloc] initDefault];
-    });
-    return instance;
-}
+    OWSAssertDebug(Environment.shared.sounds);
 
-- (instancetype)initDefault
-{
-    OWSPrimaryStorage *primaryStorage = [OWSPrimaryStorage sharedManager];
-
-    return [self initWithPrimaryStorage:primaryStorage];
+    return Environment.shared.sounds;
 }
 
 - (instancetype)initWithPrimaryStorage:(OWSPrimaryStorage *)primaryStorage
@@ -384,17 +375,13 @@ NSString *const kOWSSoundsStorageGlobalNotificationKey = @"kOWSSoundsStorageGlob
 }
 
 + (nullable OWSAudioPlayer *)audioPlayerForSound:(OWSSound)sound
+                                 audioBehavior:(OWSAudioBehavior)audioBehavior;
 {
-    return [self audioPlayerForSound:sound quiet:NO];
-}
-
-+ (nullable OWSAudioPlayer *)audioPlayerForSound:(OWSSound)sound quiet:(BOOL)quiet
-{
-    NSURL *_Nullable soundURL = [OWSSounds soundURLForSound:sound quiet:(BOOL)quiet];
+    NSURL *_Nullable soundURL = [OWSSounds soundURLForSound:sound quiet:NO];
     if (!soundURL) {
         return nil;
     }
-    OWSAudioPlayer *player = [[OWSAudioPlayer alloc] initWithMediaUrl:soundURL];
+    OWSAudioPlayer *player = [[OWSAudioPlayer alloc] initWithMediaUrl:soundURL audioBehavior:audioBehavior];
     if ([self shouldAudioPlayerLoopForSound:sound]) {
         player.isLooping = YES;
     }

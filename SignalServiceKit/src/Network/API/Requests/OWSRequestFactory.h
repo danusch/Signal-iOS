@@ -7,6 +7,7 @@ NS_ASSUME_NONNULL_BEGIN
 @class ECKeyPair;
 @class OWSDevice;
 @class PreKeyRecord;
+@class SMKUDAccessKey;
 @class SignedPreKeyRecord;
 @class TSRequest;
 
@@ -22,6 +23,8 @@ typedef NS_ENUM(NSUInteger, TSVerificationTransport) { TSVerificationTransportVo
 
 + (TSRequest *)acknowledgeMessageDeliveryRequestWithSource:(NSString *)source timestamp:(UInt64)timestamp;
 
++ (TSRequest *)acknowledgeMessageDeliveryRequestWithServerGuid:(NSString *)serverGuid;
+
 + (TSRequest *)deleteDeviceRequestWithDevice:(OWSDevice *)device;
 
 + (TSRequest *)deviceProvisioningCodeRequest;
@@ -32,7 +35,9 @@ typedef NS_ENUM(NSUInteger, TSVerificationTransport) { TSVerificationTransportVo
 
 + (TSRequest *)getMessagesRequest;
 
-+ (TSRequest *)getProfileRequestWithRecipientId:(NSString *)recipientId;
++ (TSRequest *)getProfileRequestWithRecipientId:(NSString *)recipientId
+                                    udAccessKey:(nullable SMKUDAccessKey *)udAccessKey
+    NS_SWIFT_NAME(getProfileRequest(recipientId:udAccessKey:));
 
 + (TSRequest *)turnServerInfoRequest;
 
@@ -40,19 +45,13 @@ typedef NS_ENUM(NSUInteger, TSVerificationTransport) { TSVerificationTransportVo
 
 + (TSRequest *)attachmentRequestWithAttachmentId:(UInt64)attachmentId;
 
-+ (TSRequest *)availablePreKeysCountRequest;
-
 + (TSRequest *)contactsIntersectionRequestWithHashesArray:(NSArray<NSString *> *)hashes;
-
-+ (TSRequest *)currentSignedPreKeyRequest;
 
 + (TSRequest *)profileAvatarUploadFormRequest;
 
-+ (TSRequest *)recipientPrekeyRequestWithRecipient:(NSString *)recipientNumber deviceId:(NSString *)deviceId;
-
 + (TSRequest *)registerForPushRequestWithPushIdentifier:(NSString *)identifier voipIdentifier:(NSString *)voipId;
 
-+ (TSRequest *)updateAttributesRequestWithManualMessageFetching:(BOOL)enableManualMessageFetching;
++ (TSRequest *)updateAttributesRequest;
 
 + (TSRequest *)unregisterAccountRequest;
 
@@ -61,13 +60,32 @@ typedef NS_ENUM(NSUInteger, TSVerificationTransport) { TSVerificationTransportVo
 
 + (TSRequest *)submitMessageRequestWithRecipient:(NSString *)recipientId
                                         messages:(NSArray *)messages
-                                       timeStamp:(uint64_t)timeStamp;
+                                       timeStamp:(uint64_t)timeStamp
+                                     udAccessKey:(nullable SMKUDAccessKey *)udAccessKey;
+
++ (TSRequest *)verifyCodeRequestWithVerificationCode:(NSString *)verificationCode
+                                           forNumber:(NSString *)phoneNumber
+                                                 pin:(nullable NSString *)pin
+                                        signalingKey:(NSString *)signalingKey
+                                             authKey:(NSString *)authKey;
+
+#pragma mark - Prekeys
+
++ (TSRequest *)availablePreKeysCountRequest;
+
++ (TSRequest *)currentSignedPreKeyRequest;
+
++ (TSRequest *)recipientPrekeyRequestWithRecipient:(NSString *)recipientNumber
+                                          deviceId:(NSString *)deviceId
+                                       udAccessKey:(nullable SMKUDAccessKey *)udAccessKey;
 
 + (TSRequest *)registerSignedPrekeyRequestWithSignedPreKeyRecord:(SignedPreKeyRecord *)signedPreKey;
 
 + (TSRequest *)registerPrekeysRequestWithPrekeyArray:(NSArray *)prekeys
                                          identityKey:(NSData *)identityKeyPublic
                                         signedPreKey:(SignedPreKeyRecord *)signedPreKey;
+
+#pragma mark - CDS
 
 + (TSRequest *)remoteAttestationRequest:(ECKeyPair *)keyPair
                               enclaveId:(NSString *)enclaveId
@@ -86,6 +104,10 @@ typedef NS_ENUM(NSUInteger, TSVerificationTransport) { TSVerificationTransportVo
 
 + (TSRequest *)remoteAttestationAuthRequest;
 + (TSRequest *)cdsFeedbackRequestWithResult:(NSString *)result NS_SWIFT_NAME(cdsFeedbackRequest(result:));
+
+#pragma mark - UD
+
++ (TSRequest *)udSenderCertificateRequest;
 
 @end
 

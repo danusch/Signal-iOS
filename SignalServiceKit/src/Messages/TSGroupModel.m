@@ -4,9 +4,11 @@
 
 #import "TSGroupModel.h"
 #import "FunctionalUtil.h"
-#import "NSString+SSK.h"
+#import <SignalCoreKit/NSString+SSK.h>
 
 NS_ASSUME_NONNULL_BEGIN
+
+const int32_t kGroupIdLength = 16;
 
 @interface TSGroupModel ()
 
@@ -25,6 +27,7 @@ NS_ASSUME_NONNULL_BEGIN
                       groupId:(NSData *)groupId
 {
     OWSAssertDebug(memberIds);
+    OWSAssertDebug(groupId.length == kGroupIdLength);
 
     _groupName              = title;
     _groupMemberIds         = [memberIds copy];
@@ -46,6 +49,7 @@ NS_ASSUME_NONNULL_BEGIN
     if (_groupMemberIds == nil) {
         _groupMemberIds = [NSArray new];
     }
+    OWSAssertDebug(self.groupId.length == kGroupIdLength);
 
     return self;
 }

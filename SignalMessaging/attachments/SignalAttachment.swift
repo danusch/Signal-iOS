@@ -160,6 +160,10 @@ public class SignalAttachment: NSObject {
     @objc
     public let dataUTI: String
 
+    // Can be used by views to link this SignalAttachment with an Photos framework asset.
+    @objc
+    public var assetId: String?
+
     var error: SignalAttachmentError? {
         didSet {
             AssertIsOnMainThread()
@@ -185,6 +189,16 @@ public class SignalAttachment: NSObject {
     static let kMaxFileSizeVideo = OWSMediaUtils.kMaxFileSizeVideo
     static let kMaxFileSizeAudio = OWSMediaUtils.kMaxFileSizeAudio
     static let kMaxFileSizeGeneric = OWSMediaUtils.kMaxFileSizeGeneric
+
+    // MARK: 
+
+    @objc
+    public static let isMultiSendEnabled = false
+
+    @objc
+    public static var maxAttachmentsAllowed: Int {
+        return isMultiSendEnabled ? 32 : 1
+    }
 
     // MARK: Constructor
 
@@ -237,6 +251,31 @@ public class SignalAttachment: NSObject {
             return ""
         }
         return errorDescription
+    }
+
+    @objc
+    public func buildOutgoingAttachmentInfo(message: TSMessage) -> OutgoingAttachmentInfo {
+        assert(message.uniqueId != nil)
+        return OutgoingAttachmentInfo(dataSource: dataSource,
+                                      contentType: mimeType,
+                                      sourceFilename: filenameOrDefault,
+                                      caption: captionText,
+                                      albumMessageId: message.uniqueId)
+    }
+
+    @objc
+    public func staticThumbnail() -> UIImage? {
+        if isAnimatedImage {
+            return image()
+        } else if isImage {
+            return image()
+        } else if isVideo {
+            return videoPreview()
+        } else if isAudio {
+            return nil
+        } else {
+            return nil
+        }
     }
 
     @objc
@@ -943,7 +982,7 @@ public class SignalAttachment: NSObject {
     }
 
     private class var videoTempPath: URL {
-        let videoDir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("video")
+        let videoDir = URL(fileURLWithPath: OWSTemporaryDirectory()).appendingPathComponent("video")
         OWSFileSystem.ensureDirectoryExists(videoDir.path)
         return videoDir
     }
@@ -954,7 +993,7 @@ public class SignalAttachment: NSObject {
         guard let url = dataSource.dataUrl() else {
             let attachment = SignalAttachment(dataSource: DataSourceValue.emptyDataSource(), dataUTI: dataUTI)
             attachment.error = .missingData
-            return (Promise(value: attachment), nil)
+            return (Promise.value(attachment), nil)
         }
 
         let asset = AVAsset(url: url)
@@ -962,7 +1001,7 @@ public class SignalAttachment: NSObject {
         guard let exportSession = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetMediumQuality) else {
             let attachment = SignalAttachment(dataSource: DataSourceValue.emptyDataSource(), dataUTI: dataUTI)
             attachment.error = .couldNotConvertToMpeg4
-            return (Promise(value: attachment), nil)
+            return (Promise.value(attachment), nil)
         }
 
         exportSession.shouldOptimizeForNetworkUse = true
@@ -972,7 +1011,7 @@ public class SignalAttachment: NSObject {
         let exportURL = videoTempPath.appendingPathComponent(UUID().uuidString).appendingPathExtension("mp4")
         exportSession.outputURL = exportURL
 
-        let (promise, fulfill, _) = Promise<SignalAttachment>.pending()
+        let (promise, resolver) = Promise<SignalAttachment>.pending()
 
         Logger.debug("starting video export")
         exportSession.exportAsynchronously {
@@ -985,14 +1024,14 @@ public class SignalAttachment: NSObject {
                 owsFailDebug("Failed to build data source for exported video URL")
                 let attachment = SignalAttachment(dataSource: DataSourceValue.emptyDataSource(), dataUTI: dataUTI)
                 attachment.error = .couldNotConvertToMpeg4
-                fulfill(attachment)
+                resolver.fulfill(attachment)
                 return
             }
 
             dataSource.sourceFilename = mp4Filename
 
             let attachment = SignalAttachment(dataSource: dataSource, dataUTI: kUTTypeMPEG4 as String)
-            fulfill(attachment)
+            resolver.fulfill(attachment)
         }
 
         return (promise, exportSession)
@@ -1101,7 +1140,7 @@ public class SignalAttachment: NSObject {
 
     // MARK: Attachments
 
-    // Factory method for attachments of any kind.
+    // Factory method for non-image Attachments.
     //
     // NOTE: The attachment returned by this method may not be valid.
     //       Check the attachment's error property.

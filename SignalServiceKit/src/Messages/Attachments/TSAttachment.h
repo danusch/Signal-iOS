@@ -6,6 +6,9 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+@class TSAttachmentPointer;
+@class TSMessage;
+
 typedef NS_ENUM(NSUInteger, TSAttachmentType) {
     TSAttachmentTypeDefault = 0,
     TSAttachmentTypeVoiceMessage = 1,
@@ -25,7 +28,7 @@ typedef NS_ENUM(NSUInteger, TSAttachmentType) {
 // TSAttachmentPointer, which can be distinguished by the isDownloaded
 // property.
 @property (atomic, readwrite) UInt64 serverId;
-@property (atomic, readwrite) NSData *encryptionKey;
+@property (atomic, readwrite, nullable) NSData *encryptionKey;
 @property (nonatomic, readonly) NSString *contentType;
 @property (atomic, readwrite) BOOL isDownloaded;
 @property (nonatomic) TSAttachmentType attachmentType;
@@ -37,29 +40,59 @@ typedef NS_ENUM(NSUInteger, TSAttachmentType) {
 // not the filename on disk.
 @property (nonatomic, readonly, nullable) NSString *sourceFilename;
 
+#pragma mark - Media Album
+
+@property (nonatomic, readonly, nullable) NSString *caption;
+@property (nonatomic, readonly, nullable) NSString *albumMessageId;
+- (nullable TSMessage *)fetchAlbumMessageWithTransaction:(YapDatabaseReadTransaction *)transaction;
+
+// `migrateAlbumMessageId` is only used in the migration to the new multi-attachment message scheme,
+// and shouldn't be used as a general purpose setter. Instead, `albumMessageId` should be passed as
+// an initializer param.
+- (void)migrateAlbumMessageId:(NSString *)albumMesssageId;
+
+#pragma mark -
+
 // This constructor is used for new instances of TSAttachmentPointer,
 // i.e. undownloaded incoming attachments.
 - (instancetype)initWithServerId:(UInt64)serverId
                    encryptionKey:(NSData *)encryptionKey
                        byteCount:(UInt32)byteCount
                      contentType:(NSString *)contentType
-                  sourceFilename:(nullable NSString *)sourceFilename;
+                  sourceFilename:(nullable NSString *)sourceFilename
+                         caption:(nullable NSString *)caption
+                  albumMessageId:(nullable NSString *)albumMessageId;
+
+// This constructor is used for new instances of TSAttachmentPointer,
+// i.e. undownloaded restoring attachments.
+- (instancetype)initForRestoreWithUniqueId:(NSString *)uniqueId
+                               contentType:(NSString *)contentType
+                            sourceFilename:(nullable NSString *)sourceFilename
+                                   caption:(nullable NSString *)caption
+                            albumMessageId:(nullable NSString *)albumMessageId;
 
 // This constructor is used for new instances of TSAttachmentStream
 // that represent new, un-uploaded outgoing attachments.
 - (instancetype)initWithContentType:(NSString *)contentType
                           byteCount:(UInt32)byteCount
-                     sourceFilename:(nullable NSString *)sourceFilename;
+                     sourceFilename:(nullable NSString *)sourceFilename
+                            caption:(nullable NSString *)caption
+                     albumMessageId:(nullable NSString *)albumMessageId;
 
 // This constructor is used for new instances of TSAttachmentStream
 // that represent downloaded incoming attachments.
-- (instancetype)initWithPointer:(TSAttachment *)pointer;
+- (instancetype)initWithPointer:(TSAttachmentPointer *)pointer;
 
 - (nullable instancetype)initWithCoder:(NSCoder *)coder;
 
 - (void)upgradeFromAttachmentSchemaVersion:(NSUInteger)attachmentSchemaVersion;
 
-- (BOOL)isVoiceMessage;
+@property (nonatomic, readonly) BOOL isAnimated;
+@property (nonatomic, readonly) BOOL isImage;
+@property (nonatomic, readonly) BOOL isVideo;
+@property (nonatomic, readonly) BOOL isAudio;
+@property (nonatomic, readonly) BOOL isVoiceMessage;
+@property (nonatomic, readonly) BOOL isVisualMedia;
 
 + (NSString *)emojiForMimeType:(NSString *)contentType;
 

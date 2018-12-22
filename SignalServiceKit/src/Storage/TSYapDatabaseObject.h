@@ -13,6 +13,8 @@ NS_ASSUME_NONNULL_BEGIN
 
 @interface TSYapDatabaseObject : MTLModel
 
+- (instancetype)init NS_DESIGNATED_INITIALIZER;
+
 /**
  *  Initializes a new database object with a unique identifier
  *
@@ -21,6 +23,7 @@ NS_ASSUME_NONNULL_BEGIN
  *  @return Initialized object
  */
 - (instancetype)initWithUniqueId:(NSString *_Nullable)uniqueId NS_DESIGNATED_INITIALIZER;
+
 - (nullable instancetype)initWithCoder:(NSCoder *)coder NS_DESIGNATED_INITIALIZER;
 
 /**
@@ -95,6 +98,8 @@ NS_ASSUME_NONNULL_BEGIN
  * Assign the latest persisted values from the database.
  */
 - (void)reload;
+- (void)reloadWithTransaction:(YapDatabaseReadTransaction *)transaction;
+- (void)reloadWithTransaction:(YapDatabaseReadTransaction *)transaction ignoreMissing:(BOOL)ignoreMissing;
 
 /**
  * Saves the object with the shared readWrite connection - does not block.

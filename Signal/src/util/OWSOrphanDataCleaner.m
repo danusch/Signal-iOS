@@ -4,11 +4,11 @@
 
 #import "OWSOrphanDataCleaner.h"
 #import "DateUtil.h"
+#import <SignalCoreKit/NSDate+OWS.h>
 #import <SignalMessaging/OWSProfileManager.h>
 #import <SignalMessaging/OWSUserProfile.h>
 #import <SignalServiceKit/AppReadiness.h>
 #import <SignalServiceKit/AppVersion.h>
-#import <SignalServiceKit/NSDate+OWS.h>
 #import <SignalServiceKit/OWSContact.h>
 #import <SignalServiceKit/OWSFileSystem.h>
 #import <SignalServiceKit/OWSPrimaryStorage.h>
@@ -21,6 +21,12 @@
 #import <YapDatabase/YapDatabase.h>
 
 NS_ASSUME_NONNULL_BEGIN
+
+// LOG_ALL_FILE_PATHS can be used to determine if there are other kinds of files
+// that we're not cleaning up.
+//#define LOG_ALL_FILE_PATHS
+
+#define ENABLE_ORPHAN_DATA_CLEANER
 
 NSString *const OWSOrphanDataCleaner_Collection = @"OWSOrphanDataCleaner_Collection";
 NSString *const OWSOrphanDataCleaner_LastCleaningVersionKey = @"OWSOrphanDataCleaner_LastCleaningVersionKey";
@@ -177,9 +183,6 @@ typedef void (^OrphanDataBlock)(OWSOrphanData *);
 
     __block BOOL shouldAbort = NO;
 
-    // LOG_ALL_FILE_PATHS can be used to determine if there are other kinds of files
-    // that we're not cleaning up.
-//#define LOG_ALL_FILE_PATHS
 #ifdef LOG_ALL_FILE_PATHS
     {
         NSString *documentDirPath = [OWSFileSystem appDocumentDirectoryPath];
@@ -214,8 +217,7 @@ typedef void (^OrphanDataBlock)(OWSOrphanData *);
     // a single launch of the app.  Since our "date threshold"
     // for deletion is relative to the current launch time,
     // all temp files currently in use should be safe.
-    NSString *temporaryDirectory = NSTemporaryDirectory();
-    NSArray<NSString *> *_Nullable tempFilePaths = [self filePathsInDirectorySafe:temporaryDirectory].allObjects;
+    NSArray<NSString *> *_Nullable tempFilePaths = [self getTempFilePaths];
     if (!tempFilePaths || !self.isMainAppAndActive) {
         return nil;
     }
@@ -410,17 +412,12 @@ typedef void (^OrphanDataBlock)(OWSOrphanData *);
     return result;
 }
 
-+ (void)auditOnLaunchIfNecessary
-{
++ (BOOL)shouldAuditOnLaunch:(YapDatabaseConnection *)databaseConnection {
     OWSAssertIsOnMainThread();
 
-    // In production, do not audit or clean up.
-#ifndef DEBUG
-    return;
+#ifndef ENABLE_ORPHAN_DATA_CLEANER
+    return NO;
 #endif
-
-    OWSPrimaryStorage *primaryStorage = [OWSPrimaryStorage sharedManager];
-    YapDatabaseConnection *databaseConnection = primaryStorage.dbReadWriteConnection;
 
     __block NSString *_Nullable lastCleaningVersion;
     __block NSDate *_Nullable lastCleaningDate;
@@ -431,37 +428,58 @@ typedef void (^OrphanDataBlock)(OWSOrphanData *);
                                       inCollection:OWSOrphanDataCleaner_Collection];
     }];
 
-    // Only clean up once per app version.
+    // Clean up once per app version.
     NSString *currentAppVersion = AppVersion.sharedInstance.currentAppVersion;
-    if (lastCleaningVersion && [lastCleaningVersion isEqualToString:currentAppVersion]) {
-        OWSLogVerbose(@"skipping orphan data cleanup; already done on %@.", currentAppVersion);
-        return;
+    if (!lastCleaningVersion || ![lastCleaningVersion isEqualToString:currentAppVersion]) {
+        OWSLogVerbose(@"Performing orphan data cleanup; new version: %@.", currentAppVersion);
+        return YES;
     }
 
-    // Only clean up once per day.
-    if (lastCleaningDate && [DateUtil dateIsToday:lastCleaningDate]) {
-        OWSLogVerbose(@"skipping orphan data cleanup; already done today.");
+    // Clean up once per N days.
+    if (lastCleaningDate) {
+#ifdef DEBUG
+        BOOL shouldAudit = [DateUtil dateIsOlderThanToday:lastCleaningDate];
+#else
+        BOOL shouldAudit = [DateUtil dateIsOlderThanOneWeek:lastCleaningDate];
+#endif
+
+        if (shouldAudit) {
+            OWSLogVerbose(@"Performing orphan data cleanup; time has passed.");
+        }
+        return shouldAudit;
+    }
+
+    // Has never audited before.
+    return NO;
+}
+
++ (void)auditOnLaunchIfNecessary {
+    OWSAssertIsOnMainThread();
+
+    OWSPrimaryStorage *primaryStorage = [OWSPrimaryStorage sharedManager];
+    YapDatabaseConnection *databaseConnection = [primaryStorage newDatabaseConnection];
+
+    if (![self shouldAuditOnLaunch:databaseConnection]) {
         return;
     }
 
     // If we want to be cautious, we can disable orphan deletion using
     // flag - the cleanup will just be a dry run with logging.
-    BOOL shouldRemoveOrphans = NO;
+    BOOL shouldRemoveOrphans = YES;
     [self auditAndCleanup:shouldRemoveOrphans databaseConnection:databaseConnection completion:nil];
 }
 
 + (void)auditAndCleanup:(BOOL)shouldRemoveOrphans
 {
-    OWSPrimaryStorage *primaryStorage = [OWSPrimaryStorage sharedManager];
-    YapDatabaseConnection *databaseConnection = primaryStorage.dbReadWriteConnection;
-
-    [self auditAndCleanup:shouldRemoveOrphans databaseConnection:databaseConnection completion:nil];
+    [self auditAndCleanup:shouldRemoveOrphans
+               completion:^ {
+               }];
 }
 
 + (void)auditAndCleanup:(BOOL)shouldRemoveOrphans completion:(dispatch_block_t)completion
 {
     OWSPrimaryStorage *primaryStorage = [OWSPrimaryStorage sharedManager];
-    YapDatabaseConnection *databaseConnection = primaryStorage.dbReadWriteConnection;
+    YapDatabaseConnection *databaseConnection = [primaryStorage newDatabaseConnection];
 
     [self auditAndCleanup:shouldRemoveOrphans databaseConnection:databaseConnection completion:completion];
 }
@@ -485,6 +503,10 @@ typedef void (^OrphanDataBlock)(OWSOrphanData *);
     }
     if (!CurrentAppContext().isMainApp) {
         OWSFailDebug(@"can't audit orphan data in app extensions.");
+        return;
+    }
+    if (CurrentAppContext().isRunningTests) {
+        OWSLogVerbose(@"Ignoring audit orphan data in tests.");
         return;
     }
 
@@ -605,7 +627,7 @@ typedef void (^OrphanDataBlock)(OWSOrphanData *);
 
     __block BOOL shouldAbort = NO;
 
-    // We need to avoid cleaning up new attachments and files that are still in the process of
+    // We need to avoid cleaning up new files that are still in the process of
     // being created/written, so we don't clean up anything recent.
     const NSTimeInterval kMinimumOrphanAgeSeconds = CurrentAppContext().isRunningTests ? 0.f : 15 * kMinuteInterval;
     NSDate *appLaunchTime = CurrentAppContext().appLaunchTime;
@@ -688,17 +710,17 @@ typedef void (^OrphanDataBlock)(OWSOrphanData *);
         NSError *error;
         NSDictionary *attributes = [[NSFileManager defaultManager] attributesOfItemAtPath:filePath error:&error];
         if (!attributes || error) {
-            OWSLogDebug(@"Could not get attributes of file at: %@", filePath);
-            OWSFailDebug(@"Could not get attributes of file");
+            // This is fine; the file may have been deleted since we found it.
+            OWSLogWarn(@"Could not get attributes of file at: %@", filePath);
             continue;
         }
         // Don't delete files which were created in the last N minutes.
         NSDate *creationDate = attributes.fileModificationDate;
         if ([creationDate isAfterDate:thresholdDate]) {
-            OWSLogInfo(@"Skipping orphan attachment file due to age: %f", fabs([creationDate timeIntervalSinceNow]));
+            OWSLogInfo(@"Skipping file due to age: %f", fabs([creationDate timeIntervalSinceNow]));
             continue;
         }
-        OWSLogInfo(@"Deleting orphan attachment file: %@", filePath);
+        OWSLogInfo(@"Deleting file: %@", filePath);
         filesRemoved++;
         if (!shouldRemoveOrphans) {
             continue;
@@ -709,9 +731,24 @@ typedef void (^OrphanDataBlock)(OWSOrphanData *);
             OWSFailDebug(@"Could not remove orphan file");
         }
     }
-    OWSLogInfo(@"Deleted orphan attachment files: %zu", filesRemoved);
+    OWSLogInfo(@"Deleted orphan files: %zu", filesRemoved);
 
     return YES;
+}
+
++ (nullable NSArray<NSString *> *)getTempFilePaths
+{
+    NSString *dir1 = OWSTemporaryDirectory();
+    NSArray<NSString *> *_Nullable paths1 = [[self filePathsInDirectorySafe:dir1].allObjects mutableCopy];
+
+    NSString *dir2 = OWSTemporaryDirectoryAccessibleAfterFirstAuth();
+    NSArray<NSString *> *_Nullable paths2 = [[self filePathsInDirectorySafe:dir2].allObjects mutableCopy];
+
+    if (paths1 && paths2) {
+        return [paths1 arrayByAddingObjectsFromArray:paths2];
+    } else {
+        return nil;
+    }
 }
 
 @end

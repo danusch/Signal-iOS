@@ -9,6 +9,9 @@ import XCTest
 // TODO: We might be able to merge this with OWSFakeContactsManager.
 @objc
 class ConversationSearcherContactsManager: NSObject, ContactsManagerProtocol {
+    func displayName(forPhoneIdentifier recipientId: String?, transaction: YapDatabaseReadTransaction) -> String {
+        return self.displayName(forPhoneIdentifier: recipientId)
+    }
 
     func displayName(forPhoneIdentifier phoneNumber: String?) -> String {
         if phoneNumber == aliceRecipientId {
@@ -51,8 +54,8 @@ class ConversationSearcherContactsManager: NSObject, ContactsManagerProtocol {
     }
 }
 
-let bobRecipientId = "+49030183000"
-let aliceRecipientId = "+12345678900"
+private let bobRecipientId = "+49030183000"
+private let aliceRecipientId = "+12345678900"
 
 class ConversationSearcherTest: SignalBaseTest {
 
@@ -80,11 +83,11 @@ class ConversationSearcherTest: SignalBaseTest {
         SSKEnvironment.shared.contactsManager = ConversationSearcherContactsManager()
 
         self.dbConnection.readWrite { transaction in
-            let bookModel = TSGroupModel(title: "Book Club", memberIds: [aliceRecipientId, bobRecipientId], image: nil, groupId: Randomness.generateRandomBytes(16))
+            let bookModel = TSGroupModel(title: "Book Club", memberIds: [aliceRecipientId, bobRecipientId], image: nil, groupId: Randomness.generateRandomBytes(kGroupIdLength))
             let bookClubGroupThread = TSGroupThread.getOrCreateThread(with: bookModel, transaction: transaction)
             self.bookClubThread = ThreadViewModel(thread: bookClubGroupThread, transaction: transaction)
 
-            let snackModel = TSGroupModel(title: "Snack Club", memberIds: [aliceRecipientId], image: nil, groupId: Randomness.generateRandomBytes(16))
+            let snackModel = TSGroupModel(title: "Snack Club", memberIds: [aliceRecipientId], image: nil, groupId: Randomness.generateRandomBytes(kGroupIdLength))
             let snackClubGroupThread = TSGroupThread.getOrCreateThread(with: snackModel, transaction: transaction)
             self.snackClubThread = ThreadViewModel(thread: snackClubGroupThread, transaction: transaction)
 

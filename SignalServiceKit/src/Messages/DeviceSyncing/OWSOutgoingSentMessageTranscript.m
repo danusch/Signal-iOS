@@ -55,7 +55,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (nullable SSKProtoSyncMessageBuilder *)syncMessageBuilder
 {
-    SSKProtoSyncMessageSentBuilder *sentBuilder = [SSKProtoSyncMessageSentBuilder new];
+    SSKProtoSyncMessageSentBuilder *sentBuilder = [SSKProtoSyncMessageSent builder];
     [sentBuilder setTimestamp:self.message.timestamp];
     [sentBuilder setDestination:self.sentRecipientId];
 
@@ -67,6 +67,32 @@ NS_ASSUME_NONNULL_BEGIN
     [sentBuilder setMessage:dataMessage];
     [sentBuilder setExpirationStartTimestamp:self.message.timestamp];
 
+    for (NSString *recipientId in self.message.sentRecipientIds) {
+        TSOutgoingMessageRecipientState *_Nullable recipientState =
+            [self.message recipientStateForRecipientId:recipientId];
+        if (!recipientState) {
+            OWSFailDebug(@"missing recipient state for: %@", recipientId);
+            continue;
+        }
+        if (recipientState.state != OWSOutgoingMessageRecipientStateSent) {
+            OWSFailDebug(@"unexpected recipient state for: %@", recipientId);
+            continue;
+        }
+
+        NSError *error;
+        SSKProtoSyncMessageSentUnidentifiedDeliveryStatusBuilder *statusBuilder =
+            [SSKProtoSyncMessageSentUnidentifiedDeliveryStatus builder];
+        [statusBuilder setDestination:recipientId];
+        [statusBuilder setUnidentified:recipientState.wasSentByUD];
+        SSKProtoSyncMessageSentUnidentifiedDeliveryStatus *_Nullable status =
+            [statusBuilder buildAndReturnError:&error];
+        if (error || !status) {
+            OWSFailDebug(@"Couldn't build UD status proto: %@", error);
+            continue;
+        }
+        [sentBuilder addUnidentifiedStatus:status];
+    }
+
     NSError *error;
     SSKProtoSyncMessageSent *_Nullable sentProto = [sentBuilder buildAndReturnError:&error];
     if (error || !sentProto) {
@@ -74,7 +100,7 @@ NS_ASSUME_NONNULL_BEGIN
         return nil;
     }
 
-    SSKProtoSyncMessageBuilder *syncMessageBuilder = [SSKProtoSyncMessageBuilder new];
+    SSKProtoSyncMessageBuilder *syncMessageBuilder = [SSKProtoSyncMessage builder];
     [syncMessageBuilder setSent:sentProto];
     return syncMessageBuilder;
 }

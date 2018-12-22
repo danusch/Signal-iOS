@@ -5,6 +5,8 @@
 #import "TSRequest.h"
 #import "TSAccountManager.h"
 #import "TSConstants.h"
+#import <SignalCoreKit/NSData+OWS.h>
+#import <SignalMetadataKit/SignalMetadataKit-Swift.h>
 
 @implementation TSRequest
 
@@ -28,7 +30,7 @@
 
 - (instancetype)init
 {
-    OWSRaiseException(NSInternalInconsistencyException, @"You must use the initWithURL: method");
+    OWSFail(@"You must use the initWithURL: method");
     return nil;
 }
 
@@ -39,7 +41,7 @@
                 cachePolicy:(NSURLRequestCachePolicy)cachePolicy
             timeoutInterval:(NSTimeInterval)timeoutInterval
 {
-    OWSRaiseException(NSInternalInconsistencyException, @"You must use the initWithURL method");
+    OWSFail(@"You must use the initWithURL: method");
     return nil;
 }
 

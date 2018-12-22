@@ -3,13 +3,13 @@
 //
 
 #import "Contact.h"
-#import "Cryptography.h"
-#import "NSString+SSK.h"
 #import "OWSPrimaryStorage.h"
 #import "PhoneNumber.h"
 #import "SSKEnvironment.h"
 #import "SignalRecipient.h"
 #import "TSAccountManager.h"
+#import <SignalCoreKit/Cryptography.h>
+#import <SignalCoreKit/NSString+SSK.h>
 
 @import Contacts;
 
@@ -212,8 +212,9 @@ NS_ASSUME_NONNULL_BEGIN
     __block NSMutableArray *result = [NSMutableArray array];
 
     for (PhoneNumber *number in [self.parsedPhoneNumbers sortedArrayUsingSelector:@selector(compare:)]) {
-        SignalRecipient *_Nullable signalRecipient =
-            [SignalRecipient registeredRecipientForRecipientId:number.toE164 transaction:transaction];
+        SignalRecipient *_Nullable signalRecipient = [SignalRecipient registeredRecipientForRecipientId:number.toE164
+                                                                                        mustHaveDevices:YES
+                                                                                            transaction:transaction];
         if (signalRecipient) {
             [result addObject:signalRecipient];
         }

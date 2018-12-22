@@ -9,6 +9,7 @@
 #import "OWSMessageReceiver.h"
 #import "OWSPrimaryStorage+SessionStore.h"
 #import "OWSPrimaryStorage.h"
+#import "SSKEnvironment.h"
 #import "TSContactThread.h"
 #import "TSDatabaseView.h"
 #import "TSErrorMessage_privateConstructor.h"
@@ -80,7 +81,7 @@ NS_ASSUME_NONNULL_BEGIN
     return _envelope;
 }
 
-- (void)acceptNewIdentityKey
+- (void)throws_acceptNewIdentityKey
 {
     OWSAssertIsOnMainThread();
 
@@ -89,7 +90,7 @@ NS_ASSUME_NONNULL_BEGIN
         return;
     }
 
-    NSData *_Nullable newKey = [self newIdentityKey];
+    NSData *_Nullable newKey = [self throws_newIdentityKey];
     if (!newKey) {
         OWSFailDebug(@"Couldn't extract identity key to accept");
         return;
@@ -102,7 +103,7 @@ NS_ASSUME_NONNULL_BEGIN
         [self.thread receivedMessagesForInvalidKey:newKey];
 
     for (TSInvalidIdentityKeyReceivingErrorMessage *errorMessage in messagesToDecrypt) {
-        [[OWSMessageReceiver sharedInstance] handleReceivedEnvelopeData:errorMessage.envelopeData];
+        [SSKEnvironment.shared.messageReceiver handleReceivedEnvelopeData:errorMessage.envelopeData];
 
         // Here we remove the existing error message because handleReceivedEnvelope will either
         //  1.) succeed and create a new successful message in the thread or...
@@ -111,7 +112,7 @@ NS_ASSUME_NONNULL_BEGIN
     }
 }
 
-- (nullable NSData *)newIdentityKey
+- (nullable NSData *)throws_newIdentityKey
 {
     if (!self.envelope) {
         OWSLogError(@"Error message had no envelope data to extract key from");
@@ -129,8 +130,8 @@ NS_ASSUME_NONNULL_BEGIN
         return nil;
     }
 
-    PreKeyWhisperMessage *message = [[PreKeyWhisperMessage alloc] initWithData:pkwmData];
-    return [message.identityKey removeKeyType];
+    PreKeyWhisperMessage *message = [[PreKeyWhisperMessage alloc] init_throws_withData:pkwmData];
+    return [message.identityKey throws_removeKeyType];
 }
 
 - (NSString *)theirSignalId

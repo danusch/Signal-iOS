@@ -3,7 +3,6 @@
 //
 
 #import "DataSource.h"
-#import "OWSBackupFragment.h"
 #import "TSAttachment.h"
 
 #if TARGET_OS_IPHONE
@@ -25,7 +24,9 @@ typedef void (^OWSThumbnailFailure)(void);
 - (instancetype)init NS_UNAVAILABLE;
 - (instancetype)initWithContentType:(NSString *)contentType
                           byteCount:(UInt32)byteCount
-                     sourceFilename:(nullable NSString *)sourceFilename NS_DESIGNATED_INITIALIZER;
+                     sourceFilename:(nullable NSString *)sourceFilename
+                            caption:(nullable NSString *)caption
+                     albumMessageId:(nullable NSString *)albumMessageId NS_DESIGNATED_INITIALIZER;
 
 - (instancetype)initWithPointer:(TSAttachmentPointer *)pointer NS_DESIGNATED_INITIALIZER;
 - (nullable instancetype)initWithCoder:(NSCoder *)coder NS_DESIGNATED_INITIALIZER;
@@ -43,11 +44,6 @@ typedef void (^OWSThumbnailFailure)(void);
 - (nullable NSData *)validStillImageData;
 #endif
 
-@property (nonatomic, readonly) BOOL isAnimated;
-@property (nonatomic, readonly) BOOL isImage;
-@property (nonatomic, readonly) BOOL isVideo;
-@property (nonatomic, readonly) BOOL isAudio;
-
 @property (nonatomic, readonly, nullable) UIImage *originalImage;
 @property (nonatomic, readonly, nullable) NSString *originalFilePath;
 @property (nonatomic, readonly, nullable) NSURL *originalMediaURL;
@@ -59,9 +55,6 @@ typedef void (^OWSThumbnailFailure)(void);
 - (nullable NSData *)readDataFromFileWithError:(NSError **)error;
 - (BOOL)writeData:(NSData *)data error:(NSError **)error;
 - (BOOL)writeDataSource:(DataSource *)dataSource;
-
-- (BOOL)isOversizeText;
-- (nullable NSString *)readOversizeText;
 
 + (void)deleteAttachments;
 
@@ -75,9 +68,6 @@ typedef void (^OWSThumbnailFailure)(void);
 - (CGFloat)audioDurationSeconds;
 
 + (nullable NSError *)migrateToSharedData;
-
-// Non-nil for attachments which need "lazy backup restore."
-- (nullable OWSBackupFragment *)lazyRestoreFragment;
 
 #pragma mark - Thumbnails
 
@@ -99,16 +89,11 @@ typedef void (^OWSThumbnailFailure)(void);
 
 #pragma mark - Validation
 
-- (BOOL)isValidImage;
-- (BOOL)isValidVideo;
+@property (nonatomic, readonly) BOOL isValidImage;
+@property (nonatomic, readonly) BOOL isValidVideo;
+@property (nonatomic, readonly) BOOL isValidVisualMedia;
 
 #pragma mark - Update With... Methods
-
-// Marks attachment as needing "lazy backup restore."
-- (void)markForLazyRestoreWithFragment:(OWSBackupFragment *)lazyRestoreFragment
-                           transaction:(YapDatabaseReadWriteTransaction *)transaction;
-// Marks attachment as having completed "lazy backup restore."
-- (void)updateWithLazyRestoreComplete;
 
 - (nullable TSAttachmentStream *)cloneAsThumbnail;
 

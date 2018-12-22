@@ -3,12 +3,12 @@
 //
 
 #import "OWSPrimaryStorage+PreKeyStore.h"
-#import "Cryptography.h"
 #import "OWSPrimaryStorage+keyFromIntLong.h"
 #import "TSStorageKeys.h"
 #import "YapDatabaseConnection+OWS.h"
 #import <AxolotlKit/AxolotlExceptions.h>
 #import <AxolotlKit/SessionBuilder.h>
+#import <SignalCoreKit/Cryptography.h>
 
 #define OWSPrimaryStoragePreKeyStoreCollection @"TSStorageManagerPreKeyStoreCollection"
 #define TSNextPrekeyIdKey @"TSStorageInternalSettingsNextPreKeyId"
@@ -49,7 +49,7 @@
     }
 }
 
-- (PreKeyRecord *)loadPreKey:(int)preKeyId
+- (PreKeyRecord *)throws_loadPreKey:(int)preKeyId
 {
     PreKeyRecord *preKeyRecord = [self.dbReadConnection preKeyRecordForKey:[self keyFromInt:preKeyId]
                                                               inCollection:OWSPrimaryStoragePreKeyStoreCollection];

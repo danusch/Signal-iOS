@@ -24,28 +24,24 @@ NS_ASSUME_NONNULL_BEGIN
 
 @implementation OWSNavigationController
 
-- (instancetype)initWithRootViewController:(UIViewController *)rootViewController
+- (instancetype)init
 {
-    self = [self initWithNavigationBarClass:[OWSNavigationBar class] toolbarClass:nil];
+    self = [super initWithNavigationBarClass:[OWSNavigationBar class] toolbarClass:nil];
     if (!self) {
         return self;
     }
+    [self setupNavbar];
 
-    [self pushViewController:rootViewController animated:NO];
+    return self;
+}
 
-    if (![self.navigationBar isKindOfClass:[OWSNavigationBar class]]) {
-        OWSFailDebug(@"navigationBar was unexpected class: %@", self.navigationBar);
+- (instancetype)initWithRootViewController:(UIViewController *)rootViewController
+{
+    self = [self init];
+    if (!self) {
         return self;
     }
-
-    OWSNavigationBar *navbar = (OWSNavigationBar *)self.navigationBar;
-    navbar.navBarLayoutDelegate = self;
-    [self updateLayoutForNavbar:navbar];
-
-    [[NSNotificationCenter defaultCenter] addObserver:self
-                                             selector:@selector(themeDidChange:)
-                                                 name:ThemeDidChangeNotification
-                                               object:nil];
+    [self pushViewController:rootViewController animated:NO];
 
     return self;
 }
@@ -54,6 +50,8 @@ NS_ASSUME_NONNULL_BEGIN
 {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
 }
+
+#pragma mark -
 
 - (void)themeDidChange:(NSNotification *)notification
 {
@@ -72,6 +70,22 @@ NS_ASSUME_NONNULL_BEGIN
 }
 
 #pragma mark - UINavigationBarDelegate
+
+- (void)setupNavbar
+{
+    if (![self.navigationBar isKindOfClass:[OWSNavigationBar class]]) {
+        OWSFailDebug(@"navigationBar was unexpected class: %@", self.navigationBar);
+        return;
+    }
+    OWSNavigationBar *navbar = (OWSNavigationBar *)self.navigationBar;
+    navbar.navBarLayoutDelegate = self;
+    [self updateLayoutForNavbar:navbar];
+
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(themeDidChange:)
+                                                 name:ThemeDidChangeNotification
+                                               object:nil];
+}
 
 // All OWSNavigationController serve as the UINavigationBarDelegate for their navbar.
 // We override shouldPopItem: in order to cancel some back button presses - for example,
@@ -136,11 +150,18 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (UIStatusBarStyle)preferredStatusBarStyle
 {
-    if (OWSWindowManager.sharedManager.hasCall) {
+    if (!CurrentAppContext().isMainApp) {
+        return super.preferredStatusBarStyle;
+    } else if (OWSWindowManager.sharedManager.hasCall) {
         // Status bar is overlaying the green "call banner"
         return UIStatusBarStyleLightContent;
     } else {
-        return (Theme.isDarkThemeEnabled ? UIStatusBarStyleLightContent : super.preferredStatusBarStyle);
+        UIViewController *presentedViewController = self.presentedViewController;
+        if (presentedViewController) {
+            return presentedViewController.preferredStatusBarStyle;
+        } else {
+            return (Theme.isDarkThemeEnabled ? UIStatusBarStyleLightContent : super.preferredStatusBarStyle);
+        }
     }
 }
 
@@ -151,7 +172,9 @@ NS_ASSUME_NONNULL_BEGIN
     [UIView setAnimationsEnabled:NO];
 
     if (@available(iOS 11.0, *)) {
-        if (OWSWindowManager.sharedManager.hasCall) {
+        if (!CurrentAppContext().isMainApp) {
+            self.additionalSafeAreaInsets = UIEdgeInsetsZero;
+        } else if (OWSWindowManager.sharedManager.hasCall) {
             self.additionalSafeAreaInsets = UIEdgeInsetsMake(20, 0, 0, 0);
         } else {
             self.additionalSafeAreaInsets = UIEdgeInsetsZero;
@@ -170,6 +193,13 @@ NS_ASSUME_NONNULL_BEGIN
         [self.view layoutSubviews];
     }
     [UIView setAnimationsEnabled:YES];
+}
+
+#pragma mark - Orientation
+
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations
+{
+    return UIInterfaceOrientationMaskPortrait;
 }
 
 @end

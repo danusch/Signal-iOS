@@ -14,6 +14,7 @@
 #import "ConversationViewCell.h"
 #import "ConversationViewItem.h"
 #import "ConversationViewLayout.h"
+#import "ConversationViewModel.h"
 #import "DateUtil.h"
 #import "DebugUITableViewController.h"
 #import "FingerprintViewController.h"
@@ -46,6 +47,8 @@
 #import <ContactsUI/CNContactViewController.h>
 #import <MobileCoreServices/UTCoreTypes.h>
 #import <PromiseKit/AnyPromise.h>
+#import <SignalCoreKit/NSDate+OWS.h>
+#import <SignalCoreKit/Threading.h>
 #import <SignalMessaging/Environment.h>
 #import <SignalMessaging/NSString+OWS.h>
 #import <SignalMessaging/OWSContactOffersInteraction.h>
@@ -61,11 +64,10 @@
 #import <SignalServiceKit/Contact.h>
 #import <SignalServiceKit/ContactsUpdater.h>
 #import <SignalServiceKit/MimeTypeUtil.h>
-#import <SignalServiceKit/NSDate+OWS.h>
 #import <SignalServiceKit/NSTimer+OWS.h>
 #import <SignalServiceKit/OWSAddToContactsOfferMessage.h>
 #import <SignalServiceKit/OWSAddToProfileWhitelistOfferMessage.h>
-#import <SignalServiceKit/OWSAttachmentsProcessor.h>
+#import <SignalServiceKit/OWSAttachmentDownloads.h>
 #import <SignalServiceKit/OWSBlockingManager.h>
 #import <SignalServiceKit/OWSDisappearingMessagesConfiguration.h>
 #import <SignalServiceKit/OWSIdentityManager.h>
@@ -75,12 +77,12 @@
 #import <SignalServiceKit/OWSPrimaryStorage.h>
 #import <SignalServiceKit/OWSReadReceiptManager.h>
 #import <SignalServiceKit/OWSVerificationStateChangeMessage.h>
+#import <SignalServiceKit/SignalServiceKit-Swift.h>
 #import <SignalServiceKit/TSAccountManager.h>
 #import <SignalServiceKit/TSGroupModel.h>
 #import <SignalServiceKit/TSInvalidIdentityKeyReceivingErrorMessage.h>
 #import <SignalServiceKit/TSNetworkManager.h>
 #import <SignalServiceKit/TSQuotedMessage.h>
-#import <SignalServiceKit/Threading.h>
 #import <YapDatabase/YapDatabase.h>
 #import <YapDatabase/YapDatabaseAutoView.h>
 #import <YapDatabase/YapDatabaseViewChange.h>
@@ -89,24 +91,6 @@
 @import Photos;
 
 NS_ASSUME_NONNULL_BEGIN
-
-// Always load up to n messages when user arrives.
-//
-// The smaller this number is, the faster the conversation can display.
-// To test, shrink you accessability font as much as possible, then count how many 1-line system info messages (our shortest cells) can
-// fit on screen at a time on an iPhoneX
-//
-// PERF: we could do less messages on shorter (older, slower) devices
-// PERF: we could cache the cell height, since some messages will be much taller.
-static const int kYapDatabasePageSize = 25;
-
-// Never show more than n messages in conversation view when user arrives.
-static const int kConversationInitialMaxRangeSize = 300;
-
-// Never show more than n messages in conversation view at a time.
-static const int kYapDatabaseRangeMaxLength = 25000;
-
-static const int kYapDatabaseRangeMinLength = 0;
 
 static const CGFloat kLoadMoreHeaderHeight = 60.f;
 
@@ -141,42 +125,24 @@ typedef enum : NSUInteger {
     UIDocumentMenuDelegate,
     UIDocumentPickerDelegate,
     UIImagePickerControllerDelegate,
+    OWSImagePickerControllerDelegate,
     UINavigationControllerDelegate,
     UITextViewDelegate,
     ConversationCollectionViewDelegate,
     ConversationInputToolbarDelegate,
-    GifPickerViewControllerDelegate>
+    GifPickerViewControllerDelegate,
+    ConversationViewModelDelegate>
 
 @property (nonatomic) TSThread *thread;
-@property (nonatomic, readonly) YapDatabaseConnection *editingDatabaseConnection;
-@property (nonatomic, readonly) AudioActivity *voiceNoteAudioActivity;
-@property (nonatomic, readonly) NSTimeInterval viewControllerCreatedAt;
+@property (nonatomic, readonly) ConversationViewModel *conversationViewModel;
 
-// These two properties must be updated in lockstep.
-//
-// * The first (required) step is to update uiDatabaseConnection using beginLongLivedReadTransaction.
-// * The second (required) step is to update messageMappings.
-// * The third (optional) step is to update the messageMappings range using
-//   updateMessageMappingRangeOptions.
-// * The fourth (optional) step is to update the view items using reloadViewItems.
-// * The steps must be done in strict order.
-// * If we do any of the steps, we must do all of the required steps.
-// * We can't use messageMappings or viewItems after the first step until we've
-//   done the last step; i.e.. we can't do any layout, since that uses the view
-//   items which haven't been updated yet.
-// * If the first and/or second steps changes the set of messages
-//   their ordering and/or their state, we must do the third and fourth steps.
-// * If we do the third step, we must call resetContentAndLayout afterward.
-@property (nonatomic, readonly) YapDatabaseConnection *uiDatabaseConnection;
-@property (nonatomic) YapDatabaseViewMappings *messageMappings;
+@property (nonatomic, readonly) OWSAudioActivity *recordVoiceNoteAudioActivity;
+@property (nonatomic, readonly) NSTimeInterval viewControllerCreatedAt;
 
 @property (nonatomic, readonly) ConversationInputToolbar *inputToolbar;
 @property (nonatomic, readonly) ConversationCollectionView *collectionView;
 @property (nonatomic, readonly) ConversationViewLayout *layout;
 @property (nonatomic, readonly) ConversationStyle *conversationStyle;
-
-@property (nonatomic) NSArray<ConversationViewItem *> *viewItems;
-@property (nonatomic) NSMutableDictionary<NSString *, ConversationViewItem *> *viewItemCache;
 
 @property (nonatomic, nullable) AVAudioRecorder *audioRecorder;
 @property (nonatomic, nullable) OWSAudioPlayer *audioAttachmentPlayer;
@@ -193,26 +159,15 @@ typedef enum : NSUInteger {
 @property (nonatomic, readonly) UILabel *backButtonUnreadCountLabel;
 @property (nonatomic, readonly) NSUInteger backButtonUnreadCount;
 
-@property (nonatomic) NSUInteger lastRangeLength;
 @property (nonatomic) ConversationViewAction actionOnOpen;
-@property (nonatomic, nullable) NSString *focusMessageIdOnOpen;
 
 @property (nonatomic) BOOL peek;
 
-@property (nonatomic, readonly) OWSContactsManager *contactsManager;
-@property (nonatomic, readonly) ContactsUpdater *contactsUpdater;
-@property (nonatomic, readonly) OWSMessageSender *messageSender;
-@property (nonatomic, readonly) OWSPrimaryStorage *primaryStorage;
-@property (nonatomic, readonly) TSNetworkManager *networkManager;
-@property (nonatomic, readonly) OutboundCallInitiator *outboundCallInitiator;
-@property (nonatomic, readonly) OWSBlockingManager *blockingManager;
 @property (nonatomic, readonly) ContactsViewHelper *contactsViewHelper;
 
 @property (nonatomic) BOOL userHasScrolled;
 @property (nonatomic, nullable) NSDate *lastMessageSentDate;
 
-@property (nonatomic, nullable) ThreadDynamicInteractions *dynamicInteractions;
-@property (nonatomic) BOOL hasClearedUnreadMessagesIndicator;
 @property (nonatomic) BOOL showLoadMoreHeader;
 @property (nonatomic) UILabel *loadMoreHeader;
 @property (nonatomic) uint64_t lastVisibleTimestamp;
@@ -228,16 +183,19 @@ typedef enum : NSUInteger {
 
 @property (nonatomic) BOOL isViewCompletelyAppeared;
 @property (nonatomic) BOOL isViewVisible;
-@property (nonatomic) BOOL shouldObserveDBModifications;
+@property (nonatomic) BOOL shouldObserveVMUpdates;
 @property (nonatomic) BOOL viewHasEverAppeared;
 @property (nonatomic) BOOL hasUnreadMessages;
 @property (nonatomic) BOOL isPickingMediaAsDocument;
 @property (nonatomic, nullable) NSNumber *previousLastTimestamp;
+@property (nonatomic, nullable) NSNumber *previousViewItemCount;
+@property (nonatomic, nullable) NSNumber *previousViewTopToContentBottom;
 @property (nonatomic, nullable) NSNumber *viewHorizonTimestamp;
 @property (nonatomic) ContactShareViewHelper *contactShareViewHelper;
 @property (nonatomic) NSTimer *reloadTimer;
 @property (nonatomic, nullable) NSDate *lastReloadDate;
-@property (nonatomic, nullable) NSDate *collapseCutoffDate;
+
+@property (nonatomic) CGFloat scrollDistanceToBottomSnapshot;
 
 @end
 
@@ -274,20 +232,77 @@ typedef enum : NSUInteger {
 - (void)commonInit
 {
     _viewControllerCreatedAt = CACurrentMediaTime();
-    _contactsManager = Environment.shared.contactsManager;
-    _contactsUpdater = SSKEnvironment.shared.contactsUpdater;
-    _messageSender = SSKEnvironment.shared.messageSender;
-    _outboundCallInitiator = SignalApp.sharedApp.outboundCallInitiator;
-    _primaryStorage = [OWSPrimaryStorage sharedManager];
-    _networkManager = [TSNetworkManager sharedManager];
-    _blockingManager = [OWSBlockingManager sharedManager];
     _contactsViewHelper = [[ContactsViewHelper alloc] initWithDelegate:self];
     _contactShareViewHelper = [[ContactShareViewHelper alloc] initWithContactsManager:self.contactsManager];
     _contactShareViewHelper.delegate = self;
 
     NSString *audioActivityDescription = [NSString stringWithFormat:@"%@ voice note", self.logTag];
-    _voiceNoteAudioActivity = [[AudioActivity alloc] initWithAudioDescription:audioActivityDescription];
+    _recordVoiceNoteAudioActivity = [[OWSAudioActivity alloc] initWithAudioDescription:audioActivityDescription behavior:OWSAudioBehavior_PlayAndRecord];
 }
+
+#pragma mark - Dependencies
+
+- (SSKMessageSenderJobQueue *)messageSenderJobQueue
+{
+    return SSKEnvironment.shared.messageSenderJobQueue;
+}
+
+- (OWSSessionResetJobQueue *)sessionResetJobQueue
+{
+    return AppEnvironment.shared.sessionResetJobQueue;
+}
+
+- (OWSAudioSession *)audioSession
+{
+    return Environment.shared.audioSession;
+}
+
+- (OWSMessageSender *)messageSender
+{
+    return SSKEnvironment.shared.messageSender;
+}
+
+- (OWSContactsManager *)contactsManager
+{
+    return Environment.shared.contactsManager;
+}
+
+- (ContactsUpdater *)contactsUpdater
+{
+    return SSKEnvironment.shared.contactsUpdater;
+}
+
+- (OWSBlockingManager *)blockingManager
+{
+    return [OWSBlockingManager sharedManager];
+}
+
+- (OWSPrimaryStorage *)primaryStorage
+{
+    return SSKEnvironment.shared.primaryStorage;
+}
+
+- (TSNetworkManager *)networkManager
+{
+    return SSKEnvironment.shared.networkManager;
+}
+
+- (OutboundCallInitiator *)outboundCallInitiator
+{
+    return AppEnvironment.shared.outboundCallInitiator;
+}
+
+- (id<OWSTypingIndicators>)typingIndicators
+{
+    return SSKEnvironment.shared.typingIndicators;
+}
+
+- (OWSAttachmentDownloads *)attachmentDownloads
+{
+    return SSKEnvironment.shared.attachmentDownloads;
+}
+
+#pragma mark -
 
 - (void)addNotificationListeners
 {
@@ -307,18 +322,6 @@ typedef enum : NSUInteger {
                                              selector:@selector(didChangePreferredContentSize:)
                                                  name:UIContentSizeCategoryDidChangeNotification
                                                object:nil];
-    [[NSNotificationCenter defaultCenter] addObserver:self
-                                             selector:@selector(uiDatabaseDidUpdateExternally:)
-                                                 name:OWSUIDatabaseConnectionDidUpdateExternallyNotification
-                                               object:OWSPrimaryStorage.sharedManager.dbNotificationObject];
-    [[NSNotificationCenter defaultCenter] addObserver:self
-                                             selector:@selector(uiDatabaseWillUpdate:)
-                                                 name:OWSUIDatabaseConnectionWillUpdateNotification
-                                               object:OWSPrimaryStorage.sharedManager.dbNotificationObject];
-    [[NSNotificationCenter defaultCenter] addObserver:self
-                                             selector:@selector(uiDatabaseDidUpdate:)
-                                                 name:OWSUIDatabaseConnectionDidUpdateNotification
-                                               object:OWSPrimaryStorage.sharedManager.dbNotificationObject];
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(applicationWillEnterForeground:)
                                                  name:OWSApplicationWillEnterForegroundNotification
@@ -348,10 +351,6 @@ typedef enum : NSUInteger {
                                                  name:kNSNotificationName_ProfileWhitelistDidChange
                                                object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self
-                                             selector:@selector(signalAccountsDidChange:)
-                                                 name:OWSContactsManagerSignalAccountsDidChangeNotification
-                                               object:nil];
-    [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(keyboardWillChangeFrame:)
                                                  name:UIKeyboardWillChangeFrameNotification
                                                object:nil];
@@ -364,12 +363,6 @@ typedef enum : NSUInteger {
     return self.thread.isGroupThread;
 }
 
-- (void)signalAccountsDidChange:(NSNotification *)notification
-{
-    OWSAssertIsOnMainThread();
-
-    [self ensureDynamicInteractions];
-}
 
 - (void)otherUsersProfileDidChange:(NSNotification *)notification
 {
@@ -399,11 +392,11 @@ typedef enum : NSUInteger {
     NSString *_Nullable recipientId = notification.userInfo[kNSNotificationKey_ProfileRecipientId];
     NSData *_Nullable groupId = notification.userInfo[kNSNotificationKey_ProfileGroupId];
     if (recipientId.length > 0 && [self.thread.recipientIdentifiers containsObject:recipientId]) {
-        [self ensureDynamicInteractions];
+        [self.conversationViewModel ensureDynamicInteractions];
     } else if (groupId.length > 0 && self.thread.isGroupThread) {
         TSGroupThread *groupThread = (TSGroupThread *)self.thread;
         if ([groupThread.groupModel.groupId isEqualToData:groupId]) {
-            [self ensureDynamicInteractions];
+            [self.conversationViewModel ensureDynamicInteractions];
             [self ensureBannerState];
         }
     }
@@ -446,24 +439,15 @@ typedef enum : NSUInteger {
 
     _thread = thread;
     self.actionOnOpen = action;
-    self.focusMessageIdOnOpen = focusMessageId;
     _cellMediaCache = [NSCache new];
     // Cache the cell media for ~24 cells.
     self.cellMediaCache.countLimit = 24;
     _conversationStyle = [[ConversationStyle alloc] initWithThread:thread];
 
-    // We need to update the "unread indicator" _before_ we determine the initial range
-    // size, since it depends on where the unread indicator is placed.
-    self.lastRangeLength = 0;
-    [self ensureDynamicInteractions];
-    [[OWSPrimaryStorage sharedManager] updateUIDatabaseConnectionToLatest];
+    _conversationViewModel =
+        [[ConversationViewModel alloc] initWithThread:thread focusMessageIdOnOpen:focusMessageId delegate:self];
 
-    [self createNewMessageMappings];
-    if (![self reloadViewItems]) {
-        OWSFailDebug(@"failed to reload view items in configureForThread.");
-    }
-
-    [self updateShouldObserveDBModifications];
+    [self updateShouldObserveVMUpdates];
 
     self.reloadTimer = [NSTimer weakScheduledTimerWithTimeInterval:1.f
                                                             target:self
@@ -481,8 +465,8 @@ typedef enum : NSUInteger {
 {
     OWSAssertIsOnMainThread();
 
-    if (self.isUserScrolling || !self.isViewCompletelyAppeared || !self.isViewVisible
-        || !self.shouldObserveDBModifications || !self.viewHasEverAppeared) {
+    if (self.isUserScrolling || !self.isViewCompletelyAppeared || !self.isViewVisible || !self.shouldObserveVMUpdates
+        || !self.viewHasEverAppeared) {
         return;
     }
 
@@ -548,6 +532,7 @@ typedef enum : NSUInteger {
     [self addNotificationListeners];
     [self loadDraftInCompose];
     [self applyTheme];
+    [self.conversationViewModel viewDidLoad];
 }
 
 - (void)createContents
@@ -587,6 +572,8 @@ typedef enum : NSUInteger {
     [self.loadMoreHeader autoPinWidthToWidthOfView:self.view];
     [self.loadMoreHeader autoPinEdgeToSuperviewEdge:ALEdgeTop];
     [self.loadMoreHeader autoSetDimension:ALDimensionHeight toSize:kLoadMoreHeaderHeight];
+
+    [self updateShowLoadMoreHeader];
 }
 
 - (BOOL)becomeFirstResponder
@@ -615,6 +602,8 @@ typedef enum : NSUInteger {
 {
     [self.collectionView registerClass:[OWSSystemMessageCell class]
             forCellWithReuseIdentifier:[OWSSystemMessageCell cellReuseIdentifier]];
+    [self.collectionView registerClass:[OWSTypingIndicatorCell class]
+            forCellWithReuseIdentifier:[OWSTypingIndicatorCell cellReuseIdentifier]];
     [self.collectionView registerClass:[OWSContactOffersCell class]
             forCellWithReuseIdentifier:[OWSContactOffersCell cellReuseIdentifier]];
     [self.collectionView registerClass:[OWSMessageCell class]
@@ -630,16 +619,12 @@ typedef enum : NSUInteger {
 - (void)applicationDidEnterBackground:(NSNotification *)notification
 {
     [self updateCellsVisible];
-    if (self.hasClearedUnreadMessagesIndicator) {
-        self.hasClearedUnreadMessagesIndicator = NO;
-        [self.dynamicInteractions clearUnreadIndicatorState];
-    }
     [self.cellMediaCache removeAllObjects];
 }
 
 - (void)applicationWillResignActive:(NSNotification *)notification
 {
-    [self updateShouldObserveDBModifications];
+    [self updateShouldObserveVMUpdates];
     [self cancelVoiceMemo];
     self.isUserScrolling = NO;
     [self saveDraft];
@@ -651,7 +636,7 @@ typedef enum : NSUInteger {
 
 - (void)applicationDidBecomeActive:(NSNotification *)notification
 {
-    [self updateShouldObserveDBModifications];
+    [self updateShouldObserveVMUpdates];
     [self startReadTimer];
 }
 
@@ -714,10 +699,20 @@ typedef enum : NSUInteger {
     }
 }
 
+- (NSArray<id<ConversationViewItem>> *)viewItems
+{
+    return self.conversationViewModel.viewItems;
+}
+
+- (ThreadDynamicInteractions *)dynamicInteractions
+{
+    return self.conversationViewModel.dynamicInteractions;
+}
+
 - (NSIndexPath *_Nullable)indexPathOfUnreadMessagesIndicator
 {
     NSInteger row = 0;
-    for (ConversationViewItem *viewItem in self.viewItems) {
+    for (id<ConversationViewItem> viewItem in self.viewItems) {
         if (viewItem.unreadIndicator) {
             return [NSIndexPath indexPathForRow:row inSection:0];
         }
@@ -728,7 +723,7 @@ typedef enum : NSUInteger {
 
 - (NSIndexPath *_Nullable)indexPathOfMessageOnOpen
 {
-    OWSAssertDebug(self.focusMessageIdOnOpen);
+    OWSAssertDebug(self.conversationViewModel.focusMessageIdOnOpen);
     OWSAssertDebug(self.dynamicInteractions.focusMessagePosition);
 
     if (!self.dynamicInteractions.focusMessagePosition) {
@@ -755,7 +750,7 @@ typedef enum : NSUInteger {
     }
 
     NSIndexPath *_Nullable indexPath = nil;
-    if (self.focusMessageIdOnOpen) {
+    if (self.conversationViewModel.focusMessageIdOnOpen) {
         indexPath = [self indexPathOfMessageOnOpen];
     }
 
@@ -798,10 +793,7 @@ typedef enum : NSUInteger {
 {
     // Avoid layout corrupt issues and out-of-date message subtitles.
     self.lastReloadDate = [NSDate new];
-    self.collapseCutoffDate = [NSDate new];
-    if (![self reloadViewItems]) {
-        OWSFailDebug(@"failed to reload view items in resetContentAndLayout.");
-    }
+    [self.conversationViewModel viewDidResetContentAndLayout];
     [self.collectionView.collectionViewLayout invalidateLayout];
     [self.collectionView reloadData];
 }
@@ -1089,7 +1081,7 @@ typedef enum : NSUInteger {
 
     TSGroupThread *groupThread = (TSGroupThread *)self.thread;
     int blockedMemberCount = 0;
-    NSArray<NSString *> *blockedPhoneNumbers = [_blockingManager blockedPhoneNumbers];
+    NSArray<NSString *> *blockedPhoneNumbers = [self.blockingManager blockedPhoneNumbers];
     for (NSString *contactIdentifier in groupThread.groupModel.groupMemberIds) {
         if ([blockedPhoneNumbers containsObject:contactIdentifier]) {
             blockedMemberCount++;
@@ -1123,14 +1115,14 @@ typedef enum : NSUInteger {
 {
     [super viewDidAppear:animated];
 
-    [ProfileFetcherJob runWithThread:self.thread networkManager:self.networkManager];
+    [ProfileFetcherJob runWithThread:self.thread];
     [self markVisibleMessagesAsRead];
     [self startReadTimer];
     [self updateNavigationBarSubtitleLabel];
     [self updateBackButtonUnreadCount];
     [self autoLoadMoreIfNecessary];
 
-    self.focusMessageIdOnOpen = nil;
+    self.conversationViewModel.focusMessageIdOnOpen = nil;
 
     self.isViewCompletelyAppeared = YES;
     self.viewHasEverAppeared = YES;
@@ -1553,7 +1545,7 @@ typedef enum : NSUInteger {
     OWSLogInfo(@"didChangePreferredContentSize");
 
     // Evacuate cached cell sizes.
-    for (ConversationViewItem *viewItem in self.viewItems) {
+    for (id<ConversationViewItem> viewItem in self.viewItems) {
         [viewItem clearCachedLayoutState];
     }
     [self resetContentAndLayout];
@@ -1609,61 +1601,15 @@ typedef enum : NSUInteger {
     }
     static const CGFloat kThreshold = 50.f;
     if (self.collectionView.contentOffset.y < kThreshold) {
-        [self loadAnotherPageOfMessages];
+        [self.conversationViewModel loadAnotherPageOfMessages];
     }
-}
-
-- (void)loadAnotherPageOfMessages
-{
-    BOOL hasEarlierUnseenMessages = self.dynamicInteractions.unreadIndicator.hasMoreUnseenMessages;
-
-    [self loadNMoreMessages:kYapDatabasePageSize];
-
-    // Don’t auto-scroll after “loading more messages” unless we have “more unseen messages”.
-    //
-    // Otherwise, tapping on "load more messages" autoscrolls you downward which is completely wrong.
-    if (hasEarlierUnseenMessages && !self.focusMessageIdOnOpen) {
-        // Ensure view items are updated before trying to scroll to the
-        // unread indicator.
-        //
-        // loadNMoreMessages calls resetMappings which calls ensureDynamicInteractions,
-        // which may move the unread indicator, and for scrollToUnreadIndicatorAnimated
-        // to work properly, the view items need to be updated to reflect that change.
-        [[OWSPrimaryStorage sharedManager] updateUIDatabaseConnectionToLatest];
-
-        [self scrollToUnreadIndicatorAnimated];
-    }
-}
-
-- (void)loadNMoreMessages:(NSUInteger)numberOfMessagesToLoad
-{
-    // We want to restore the current scroll state after we update the range, update
-    // the dynamic interactions and re-layout.  Here we take a "before" snapshot.
-    CGFloat scrollDistanceToBottom = self.safeContentHeight - self.collectionView.contentOffset.y;
-
-    self.lastRangeLength = MIN(self.lastRangeLength + numberOfMessagesToLoad, (NSUInteger)kYapDatabaseRangeMaxLength);
-
-    [self resetMappings];
-
-    [self.layout prepareLayout];
-
-    self.collectionView.contentOffset = CGPointMake(0, self.safeContentHeight - scrollDistanceToBottom);
 }
 
 - (void)updateShowLoadMoreHeader
 {
-    if (self.lastRangeLength == kYapDatabaseRangeMaxLength) {
-        self.showLoadMoreHeader = NO;
-        return;
-    }
+    OWSAssertDebug(self.conversationViewModel);
 
-    NSUInteger loadWindowSize = [self.messageMappings numberOfItemsInGroup:self.thread.uniqueId];
-    __block NSUInteger totalMessageCount;
-    [self.uiDatabaseConnection readWithBlock:^(YapDatabaseReadTransaction *transaction) {
-        totalMessageCount =
-            [[transaction ext:TSMessageDatabaseViewExtensionName] numberOfItemsInGroup:self.thread.uniqueId];
-    }];
-    self.showLoadMoreHeader = loadWindowSize < totalMessageCount;
+    self.showLoadMoreHeader = self.conversationViewModel.canLoadMoreItems;
 }
 
 - (void)setShowLoadMoreHeader:(BOOL)showLoadMoreHeader
@@ -1700,78 +1646,22 @@ typedef enum : NSUInteger {
     [self updateBarButtonItems];
 }
 
-- (void)updateMessageMappingRangeOptions
-{
-    NSUInteger rangeLength = 0;
-    
-    if (self.lastRangeLength == 0) {
-        // If this is the first time we're configuring the range length,
-        // try to take into account the position of the unread indicator
-        // and the "focus message".
-        OWSAssertDebug(self.dynamicInteractions);
-
-        if (self.focusMessageIdOnOpen) {
-            OWSAssertDebug(self.dynamicInteractions.focusMessagePosition);
-            if (self.dynamicInteractions.focusMessagePosition) {
-                OWSLogVerbose(@"ensuring load of focus message: %@", self.dynamicInteractions.focusMessagePosition);
-                rangeLength = MAX(rangeLength, 1 + self.dynamicInteractions.focusMessagePosition.unsignedIntegerValue);
-            }
-        }
-
-        if (self.dynamicInteractions.unreadIndicator) {
-            NSUInteger unreadIndicatorPosition
-                = (NSUInteger)self.dynamicInteractions.unreadIndicator.unreadIndicatorPosition;
-
-            // If there is an unread indicator, increase the initial load window
-            // to include it.
-            OWSAssertDebug(unreadIndicatorPosition > 0);
-            OWSAssertDebug(unreadIndicatorPosition <= kYapDatabaseRangeMaxLength);
-
-            // We'd like to include at least N seen messages,
-            // to give the user the context of where they left off the conversation.
-            const NSUInteger kPreferredSeenMessageCount = 1;
-            rangeLength = MAX(rangeLength, unreadIndicatorPosition + kPreferredSeenMessageCount);
-        }
-    }
-
-    // Always try to load at least a single page of messages.
-    rangeLength = MAX(rangeLength, kYapDatabasePageSize);
-
-    // Range size should monotonically increase.
-    rangeLength = MAX(rangeLength, self.lastRangeLength);
-
-    // Enforce max range size.
-    rangeLength = MIN(rangeLength, kYapDatabaseRangeMaxLength);
-
-    self.lastRangeLength = rangeLength;
-
-    YapDatabaseViewRangeOptions *rangeOptions =
-        [YapDatabaseViewRangeOptions flexibleRangeWithLength:rangeLength offset:0 from:YapDatabaseViewEnd];
-
-    rangeOptions.maxLength = MAX(rangeLength, kYapDatabaseRangeMaxLength);
-    rangeOptions.minLength = kYapDatabaseRangeMinLength;
-
-    [self.messageMappings setRangeOptions:rangeOptions forGroup:self.thread.uniqueId];
-    [self updateShowLoadMoreHeader];
-    self.collapseCutoffDate = [NSDate new];
-}
-
 #pragma mark Bubble User Actions
 
 - (void)handleFailedDownloadTapForMessage:(TSMessage *)message
-                        attachmentPointer:(TSAttachmentPointer *)attachmentPointer
 {
-    OWSAttachmentsProcessor *processor =
-        [[OWSAttachmentsProcessor alloc] initWithAttachmentPointer:attachmentPointer
-                                                    networkManager:self.networkManager];
-    [processor fetchAttachmentsForMessage:message
-        primaryStorage:self.primaryStorage
-        success:^(TSAttachmentStream *attachmentStream) {
-            OWSLogInfo(@"Successfully redownloaded attachment in thread: %@", message.thread);
-        }
-        failure:^(NSError *error) {
-            OWSLogWarn(@"Failed to redownload message with error: %@", error);
-        }];
+    OWSAssert(message);
+
+    [self.uiDatabaseConnection readWithBlock:^(YapDatabaseReadTransaction *transaction) {
+        [self.attachmentDownloads downloadAttachmentsForMessage:message
+            transaction:transaction
+            success:^(NSArray<TSAttachmentStream *> *attachmentStreams) {
+                OWSLogInfo(@"Successfully redownloaded attachment in thread: %@", message.thread);
+            }
+            failure:^(NSError *error) {
+                OWSLogWarn(@"Failed to redownload message with error: %@", error);
+            }];
+    }];
 }
 
 - (void)handleUnsentMessageTap:(TSOutgoingMessage *)message
@@ -1790,18 +1680,15 @@ typedef enum : NSUInteger {
                                                                 }];
     [actionSheetController addAction:deleteMessageAction];
 
-    UIAlertAction *resendMessageAction =
-        [UIAlertAction actionWithTitle:NSLocalizedString(@"SEND_AGAIN_BUTTON", @"")
-                                 style:UIAlertActionStyleDefault
-                               handler:^(UIAlertAction *action) {
-                                   [self.messageSender enqueueMessage:message
-                                       success:^{
-                                           OWSLogInfo(@"Successfully resent failed message.");
-                                       }
-                                       failure:^(NSError *error) {
-                                           OWSLogWarn(@"Failed to send message with error: %@", error);
-                                       }];
-                               }];
+    UIAlertAction *resendMessageAction = [UIAlertAction
+        actionWithTitle:NSLocalizedString(@"SEND_AGAIN_BUTTON", @"")
+                  style:UIAlertActionStyleDefault
+                handler:^(UIAlertAction *action) {
+                    [self.editingDatabaseConnection
+                        asyncReadWriteWithBlock:^(YapDatabaseReadWriteTransaction *_Nonnull transaction) {
+                            [self.messageSenderJobQueue addMessage:message transaction:transaction];
+                        }];
+                }];
 
     [actionSheetController addAction:resendMessageAction];
 
@@ -1850,9 +1737,10 @@ typedef enum : NSUInteger {
                         return;
                     }
                     TSContactThread *contactThread = (TSContactThread *)self.thread;
-                    [OWSSessionResetJob runWithContactThread:contactThread
-                                               messageSender:self.messageSender
-                                              primaryStorage:self.primaryStorage];
+                    [self.editingDatabaseConnection
+                        asyncReadWriteWithBlock:^(YapDatabaseReadWriteTransaction *_Nonnull transaction) {
+                            [self.sessionResetJobQueue addContactThread:contactThread transaction:transaction];
+                        }];
                 }];
     [alertController addAction:resetSessionAction];
 
@@ -1892,7 +1780,9 @@ typedef enum : NSUInteger {
                                    // but there will be some legacy ones in the wild, behind which await
                                    // as-of-yet-undecrypted messages
                                    if ([errorMessage isKindOfClass:[TSInvalidIdentityKeyReceivingErrorMessage class]]) {
-                                       [errorMessage acceptNewIdentityKey];
+                                       // Deliberately crash if the user fails to explicitly accept the new identity
+                                       // key. In practice we haven't been creating these messages in over a year.
+                                       [errorMessage throws_acceptNewIdentityKey];
                                    }
                                }];
     [actionSheetController addAction:acceptSafetyNumberAction];
@@ -1933,12 +1823,12 @@ typedef enum : NSUInteger {
 
 #pragma mark - MessageActionsDelegate
 
-- (void)messageActionsShowDetailsForItem:(ConversationViewItem *)conversationViewItem
+- (void)messageActionsShowDetailsForItem:(id<ConversationViewItem>)conversationViewItem
 {
     [self showDetailViewForViewItem:conversationViewItem];
 }
 
-- (void)messageActionsReplyToItem:(ConversationViewItem *)conversationViewItem
+- (void)messageActionsReplyToItem:(id<ConversationViewItem>)conversationViewItem
 {
     [self populateReplyForViewItem:conversationViewItem];
 }
@@ -1949,7 +1839,7 @@ typedef enum : NSUInteger {
 {
     [[OWSWindowManager sharedManager] hideMenuActionsWindow];
 
-    [self updateShouldObserveDBModifications];
+    [self updateShouldObserveVMUpdates];
 }
 
 - (void)menuActions:(MenuActionsViewController *)menuActionsViewController
@@ -2006,27 +1896,32 @@ typedef enum : NSUInteger {
 
 #pragma mark - ConversationViewCellDelegate
 
-- (void)conversationCell:(ConversationViewCell *)cell didLongpressMediaViewItem:(ConversationViewItem *)viewItem
+- (void)conversationCell:(ConversationViewCell *)cell didLongpressMediaViewItem:(id<ConversationViewItem>)viewItem
 {
-    NSArray<MenuAction *> *messageActions = [viewItem mediaActionsWithDelegate:self];
+    NSArray<MenuAction *> *messageActions =
+        [ConversationViewItemActions mediaActionsWithConversationViewItem:viewItem delegate:self];
     [self presentMessageActions:messageActions withFocusedCell:cell];
 }
 
-- (void)conversationCell:(ConversationViewCell *)cell didLongpressTextViewItem:(ConversationViewItem *)viewItem
+- (void)conversationCell:(ConversationViewCell *)cell didLongpressTextViewItem:(id<ConversationViewItem>)viewItem
 {
-    NSArray<MenuAction *> *messageActions = [viewItem textActionsWithDelegate:self];
+    NSArray<MenuAction *> *messageActions =
+        [ConversationViewItemActions textActionsWithConversationViewItem:viewItem delegate:self];
     [self presentMessageActions:messageActions withFocusedCell:cell];
 }
 
-- (void)conversationCell:(ConversationViewCell *)cell didLongpressQuoteViewItem:(ConversationViewItem *)viewItem
+- (void)conversationCell:(ConversationViewCell *)cell didLongpressQuoteViewItem:(id<ConversationViewItem>)viewItem
 {
-    NSArray<MenuAction *> *messageActions = [viewItem quotedMessageActionsWithDelegate:self];
+    NSArray<MenuAction *> *messageActions =
+        [ConversationViewItemActions quotedMessageActionsWithConversationViewItem:viewItem delegate:self];
     [self presentMessageActions:messageActions withFocusedCell:cell];
 }
 
-- (void)conversationCell:(ConversationViewCell *)cell didLongpressSystemMessageViewItem:(ConversationViewItem *)viewItem
+- (void)conversationCell:(ConversationViewCell *)cell
+    didLongpressSystemMessageViewItem:(id<ConversationViewItem>)viewItem
 {
-    NSArray<MenuAction *> *messageActions = [viewItem infoMessageActionsWithDelegate:self];
+    NSArray<MenuAction *> *messageActions =
+        [ConversationViewItemActions infoMessageActionsWithConversationViewItem:viewItem delegate:self];
     [self presentMessageActions:messageActions withFocusedCell:cell];
 }
 
@@ -2039,7 +1934,7 @@ typedef enum : NSUInteger {
 
     [[OWSWindowManager sharedManager] showMenuActionsWindow:menuActionsViewController];
 
-    [self updateShouldObserveDBModifications];
+    [self updateShouldObserveVMUpdates];
 }
 
 - (NSAttributedString *)attributedContactOrProfileNameForPhoneIdentifier:(NSString *)recipientId
@@ -2141,7 +2036,7 @@ typedef enum : NSUInteger {
 
 #pragma mark - OWSMessageBubbleViewDelegate
 
-- (void)didTapImageViewItem:(ConversationViewItem *)viewItem
+- (void)didTapImageViewItem:(id<ConversationViewItem>)viewItem
            attachmentStream:(TSAttachmentStream *)attachmentStream
                   imageView:(UIView *)imageView
 {
@@ -2158,21 +2053,15 @@ typedef enum : NSUInteger {
         [self becomeFirstResponder];
     }
 
-    if (![viewItem.interaction isKindOfClass:[TSMessage class]]) {
-        OWSFailDebug(@"Unexpected viewItem.interaction");
-        return;
-    }
-    TSMessage *mediaMessage = (TSMessage *)viewItem.interaction;
+    MediaGallery *mediaGallery =
+        [[MediaGallery alloc] initWithThread:self.thread
+                        uiDatabaseConnection:self.uiDatabaseConnection
+                                     options:MediaGalleryOptionSliderEnabled | MediaGalleryOptionShowAllMediaButton];
 
-    MediaGalleryViewController *vc = [[MediaGalleryViewController alloc]
-              initWithThread:self.thread
-        uiDatabaseConnection:self.uiDatabaseConnection
-                     options:MediaGalleryOptionSliderEnabled | MediaGalleryOptionShowAllMediaButton];
-
-    [vc presentDetailViewFromViewController:self mediaMessage:mediaMessage replacingView:imageView];
+    [mediaGallery presentDetailViewFromViewController:self mediaAttachment:attachmentStream replacingView:imageView];
 }
 
-- (void)didTapVideoViewItem:(ConversationViewItem *)viewItem
+- (void)didTapVideoViewItem:(id<ConversationViewItem>)viewItem
            attachmentStream:(TSAttachmentStream *)attachmentStream
                   imageView:(UIImageView *)imageView
 {
@@ -2187,21 +2076,15 @@ typedef enum : NSUInteger {
         [self becomeFirstResponder];
     }
 
-    if (![viewItem.interaction isKindOfClass:[TSMessage class]]) {
-        OWSFailDebug(@"Unexpected viewItem.interaction");
-        return;
-    }
-    TSMessage *mediaMessage = (TSMessage *)viewItem.interaction;
+    MediaGallery *mediaGallery =
+        [[MediaGallery alloc] initWithThread:self.thread
+                        uiDatabaseConnection:self.uiDatabaseConnection
+                                     options:MediaGalleryOptionSliderEnabled | MediaGalleryOptionShowAllMediaButton];
 
-    MediaGalleryViewController *vc = [[MediaGalleryViewController alloc]
-              initWithThread:self.thread
-        uiDatabaseConnection:self.uiDatabaseConnection
-                     options:MediaGalleryOptionSliderEnabled | MediaGalleryOptionShowAllMediaButton];
-
-    [vc presentDetailViewFromViewController:self mediaMessage:mediaMessage replacingView:imageView];
+    [mediaGallery presentDetailViewFromViewController:self mediaAttachment:attachmentStream replacingView:imageView];
 }
 
-- (void)didTapAudioViewItem:(ConversationViewItem *)viewItem attachmentStream:(TSAttachmentStream *)attachmentStream
+- (void)didTapAudioViewItem:(id<ConversationViewItem>)viewItem attachmentStream:(TSAttachmentStream *)attachmentStream
 {
     OWSAssertIsOnMainThread();
     OWSAssertDebug(viewItem);
@@ -2224,14 +2107,16 @@ typedef enum : NSUInteger {
         [self.audioAttachmentPlayer stop];
         self.audioAttachmentPlayer = nil;
     }
+
     self.audioAttachmentPlayer =
-        [[OWSAudioPlayer alloc] initWithMediaUrl:attachmentStream.originalMediaURL delegate:viewItem];
+        [[OWSAudioPlayer alloc] initWithMediaUrl:attachmentStream.originalMediaURL audioBehavior:OWSAudioBehavior_AudioMessagePlayback delegate:viewItem];
+    
     // Associate the player with this media adapter.
     self.audioAttachmentPlayer.owner = viewItem;
-    [self.audioAttachmentPlayer playWithPlaybackAudioCategory];
+    [self.audioAttachmentPlayer play];
 }
 
-- (void)didTapTruncatedTextMessage:(ConversationViewItem *)conversationItem
+- (void)didTapTruncatedTextMessage:(id<ConversationViewItem>)conversationItem
 {
     OWSAssertIsOnMainThread();
     OWSAssertDebug(conversationItem);
@@ -2241,7 +2126,7 @@ typedef enum : NSUInteger {
     [self.navigationController pushViewController:view animated:YES];
 }
 
-- (void)didTapContactShareViewItem:(ConversationViewItem *)conversationItem
+- (void)didTapContactShareViewItem:(id<ConversationViewItem>)conversationItem
 {
     OWSAssertIsOnMainThread();
     OWSAssertDebug(conversationItem);
@@ -2276,16 +2161,14 @@ typedef enum : NSUInteger {
     [self.contactShareViewHelper showAddToContactsWithContactShare:contactShare fromViewController:self];
 }
 
-- (void)didTapFailedIncomingAttachment:(ConversationViewItem *)viewItem
-                     attachmentPointer:(TSAttachmentPointer *)attachmentPointer
+- (void)didTapFailedIncomingAttachment:(id<ConversationViewItem>)viewItem
 {
     OWSAssertIsOnMainThread();
     OWSAssertDebug(viewItem);
-    OWSAssertDebug(attachmentPointer);
 
     // Restart failed downloads
     TSMessage *message = (TSMessage *)viewItem.interaction;
-    [self handleFailedDownloadTapForMessage:message attachmentPointer:attachmentPointer];
+    [self handleFailedDownloadTapForMessage:message];
 }
 
 - (void)didTapFailedOutgoingMessage:(TSOutgoingMessage *)message
@@ -2296,7 +2179,7 @@ typedef enum : NSUInteger {
     [self handleUnsentMessageTap:message];
 }
 
-- (void)didTapConversationItem:(ConversationViewItem *)viewItem
+- (void)didTapConversationItem:(id<ConversationViewItem>)viewItem
                                  quotedReply:(OWSQuotedReplyModel *)quotedReply
     failedThumbnailDownloadAttachmentPointer:(TSAttachmentPointer *)attachmentPointer
 {
@@ -2310,16 +2193,13 @@ typedef enum : NSUInteger {
         return;
     }
 
-    OWSAttachmentsProcessor *processor =
-        [[OWSAttachmentsProcessor alloc] initWithAttachmentPointer:attachmentPointer
-                                                    networkManager:self.networkManager];
-
-    [self.editingDatabaseConnection asyncReadWriteWithBlock:^(YapDatabaseReadWriteTransaction *transaction) {
-        [processor fetchAttachmentsForMessage:nil
-            transaction:transaction
-            success:^(TSAttachmentStream *attachmentStream) {
+    [self.uiDatabaseConnection asyncReadWithBlock:^(YapDatabaseReadTransaction *transaction) {
+        [self.attachmentDownloads downloadAttachmentPointer:attachmentPointer
+            success:^(NSArray<TSAttachmentStream *> *attachmentStreams) {
+                OWSAssertDebug(attachmentStreams.count == 1);
+                TSAttachmentStream *attachmentStream = attachmentStreams.firstObject;
                 [self.editingDatabaseConnection
-                    asyncReadWriteWithBlock:^(YapDatabaseReadWriteTransaction *postSuccessTransaction) {
+                    readWriteWithBlock:^(YapDatabaseReadWriteTransaction *postSuccessTransaction) {
                         [message setQuotedMessageThumbnailAttachmentStream:attachmentStream];
                         [message saveWithTransaction:postSuccessTransaction];
                     }];
@@ -2327,14 +2207,14 @@ typedef enum : NSUInteger {
             failure:^(NSError *error) {
                 OWSLogWarn(@"Failed to redownload thumbnail with error: %@", error);
                 [self.editingDatabaseConnection
-                    asyncReadWriteWithBlock:^(YapDatabaseReadWriteTransaction *postSuccessTransaction) {
-                        [message touchWithTransaction:transaction];
+                    readWriteWithBlock:^(YapDatabaseReadWriteTransaction *postSuccessTransaction) {
+                        [message touchWithTransaction:postSuccessTransaction];
                     }];
             }];
     }];
 }
 
-- (void)didTapConversationItem:(ConversationViewItem *)viewItem quotedReply:(OWSQuotedReplyModel *)quotedReply
+- (void)didTapConversationItem:(id<ConversationViewItem>)viewItem quotedReply:(OWSQuotedReplyModel *)quotedReply
 {
     OWSAssertIsOnMainThread();
     OWSAssertDebug(viewItem);
@@ -2342,104 +2222,12 @@ typedef enum : NSUInteger {
     OWSAssertDebug(quotedReply.timestamp > 0);
     OWSAssertDebug(quotedReply.authorId.length > 0);
 
-    // We try to find the index of the item within the current thread's
-    // interactions that includes the "quoted interaction".
-    //
-    // NOTE: There are two indices:
-    //
-    // * The "group index" of the member of the database views group at
-    //   the db conneciton's current checkpoint.
-    // * The "index row/section" in the message mapping.
-    //
-    // NOTE: Since the range _IS NOT_ filtered by author,
-    // and timestamp collisions are possible, it's possible
-    // for:
-    //
-    // * The range to include more than the "quoted interaction".
-    // * The range to be non-empty but NOT include the "quoted interaction",
-    //   although this would be a bug.
-    __block TSInteraction *_Nullable quotedInteraction;
-    __block NSUInteger threadInteractionCount = 0;
-    __block NSNumber *_Nullable groupIndex = nil;
-
-    if (quotedReply.isRemotelySourced) {
+    NSIndexPath *_Nullable indexPath = [self.conversationViewModel ensureLoadWindowContainsQuotedReply:quotedReply];
+    if (!indexPath) {
         [self presentRemotelySourcedQuotedReplyToast];
         return;
     }
 
-    [self.uiDatabaseConnection readWithBlock:^(YapDatabaseReadTransaction *transaction) {
-        quotedInteraction = [ThreadUtil findInteractionInThreadByTimestamp:quotedReply.timestamp
-                                                                  authorId:quotedReply.authorId
-                                                            threadUniqueId:self.thread.uniqueId
-                                                               transaction:transaction];
-        if (!quotedInteraction) {
-            return;
-        }
-
-        YapDatabaseAutoViewTransaction *_Nullable extension =
-            [transaction extension:TSMessageDatabaseViewExtensionName];
-        if (!extension) {
-            OWSFailDebug(@"Couldn't load view.");
-            return;
-        }
-
-        threadInteractionCount = [extension numberOfItemsInGroup:self.thread.uniqueId];
-
-        groupIndex = [self findGroupIndexOfThreadInteraction:quotedInteraction transaction:transaction];
-    }];
-
-    if (!quotedInteraction || !groupIndex) {
-        [self presentMissingQuotedReplyToast];
-        return;
-    }
-
-    NSUInteger indexRow = 0;
-    NSUInteger indexSection = 0;
-    BOOL isInMappings = [self.messageMappings getRow:&indexRow
-                                             section:&indexSection
-                                            forIndex:groupIndex.unsignedIntegerValue
-                                             inGroup:self.thread.uniqueId];
-
-    if (!isInMappings) {
-        NSInteger desiredWindowSize = MAX(0, 1 + (NSInteger)threadInteractionCount - groupIndex.integerValue);
-        NSUInteger oldLoadWindowSize = [self.messageMappings numberOfItemsInGroup:self.thread.uniqueId];
-        NSInteger additionalItemsToLoad = MAX(0, desiredWindowSize - (NSInteger)oldLoadWindowSize);
-        if (additionalItemsToLoad < 1) {
-            OWSLogError(@"Couldn't determine how to load quoted reply.");
-            return;
-        }
-
-        // Try to load more messages so that the quoted message
-        // is in the load window.
-        //
-        // This may fail if the quoted message is very old, in which
-        // case we'll load the max number of messages.
-        [self loadNMoreMessages:(NSUInteger)additionalItemsToLoad];
-
-        // `loadNMoreMessages` will reset the mapping and possibly
-        // integrate new changes, so we need to reload the "group index"
-        // of the quoted message.
-        [self.uiDatabaseConnection readWithBlock:^(YapDatabaseReadTransaction *transaction) {
-            groupIndex = [self findGroupIndexOfThreadInteraction:quotedInteraction transaction:transaction];
-        }];
-
-        if (!quotedInteraction || !groupIndex) {
-            OWSLogError(@"Failed to find quoted reply in group.");
-            return;
-        }
-
-        isInMappings = [self.messageMappings getRow:&indexRow
-                                            section:&indexSection
-                                           forIndex:groupIndex.unsignedIntegerValue
-                                            inGroup:self.thread.uniqueId];
-
-        if (!isInMappings) {
-            OWSLogError(@"Could not load quoted reply into mapping.");
-            return;
-        }
-    }
-
-    NSIndexPath *indexPath = [NSIndexPath indexPathForRow:(NSInteger)indexRow inSection:(NSInteger)indexSection];
     [self.collectionView scrollToItemAtIndexPath:indexPath
                                 atScrollPosition:UICollectionViewScrollPositionTop
                                         animated:YES];
@@ -2447,29 +2235,7 @@ typedef enum : NSUInteger {
     // TODO: Highlight the quoted message?
 }
 
-- (nullable NSNumber *)findGroupIndexOfThreadInteraction:(TSInteraction *)interaction
-                                             transaction:(YapDatabaseReadTransaction *)transaction
-{
-    OWSAssertDebug(interaction);
-    OWSAssertDebug(transaction);
-
-    YapDatabaseAutoViewTransaction *_Nullable extension = [transaction extension:TSMessageDatabaseViewExtensionName];
-    if (!extension) {
-        OWSFailDebug(@"Couldn't load view.");
-        return nil;
-    }
-
-    NSUInteger groupIndex = 0;
-    BOOL foundInGroup =
-        [extension getGroup:nil index:&groupIndex forKey:interaction.uniqueId inCollection:TSInteraction.collection];
-    if (!foundInGroup) {
-        OWSLogError(@"Couldn't find quoted message in group.");
-        return nil;
-    }
-    return @(groupIndex);
-}
-
-- (void)showDetailViewForViewItem:(ConversationViewItem *)conversationItem
+- (void)showDetailViewForViewItem:(id<ConversationViewItem>)conversationItem
 {
     OWSAssertIsOnMainThread();
     OWSAssertDebug(conversationItem);
@@ -2484,7 +2250,7 @@ typedef enum : NSUInteger {
     [self.navigationController pushViewController:view animated:YES];
 }
 
-- (void)populateReplyForViewItem:(ConversationViewItem *)conversationItem
+- (void)populateReplyForViewItem:(id<ConversationViewItem>)conversationItem
 {
     OWSLogDebug(@"user did tap reply");
 
@@ -2533,58 +2299,7 @@ typedef enum : NSUInteger {
 
 - (void)contactsViewHelperDidUpdateContacts
 {
-    [self ensureDynamicInteractions];
-}
-
-- (void)ensureDynamicInteractions
-{
-    OWSAssertIsOnMainThread();
-
-    const int currentMaxRangeSize = (int)self.lastRangeLength;
-    const int maxRangeSize = MAX(kConversationInitialMaxRangeSize, currentMaxRangeSize);
-
-    self.dynamicInteractions = [ThreadUtil ensureDynamicInteractionsForThread:self.thread
-                                                              contactsManager:self.contactsManager
-                                                              blockingManager:self.blockingManager
-                                                                 dbConnection:self.editingDatabaseConnection
-                                                  hideUnreadMessagesIndicator:self.hasClearedUnreadMessagesIndicator
-                                                          lastUnreadIndicator:self.dynamicInteractions.unreadIndicator
-                                                               focusMessageId:self.focusMessageIdOnOpen
-                                                                 maxRangeSize:maxRangeSize];
-}
-
-- (void)clearUnreadMessagesIndicator
-{
-    OWSAssertIsOnMainThread();
-
-    NSIndexPath *_Nullable indexPathOfUnreadIndicator = [self indexPathOfUnreadMessagesIndicator];
-    if (indexPathOfUnreadIndicator) {
-        ConversationViewItem *oldIndicatorItem = [self viewItemForIndex:indexPathOfUnreadIndicator.row];
-        OWSAssertDebug(oldIndicatorItem);
-
-        // TODO ideally this would be happening within the *same* transaction that caused the unreadMessageIndicator
-        // to be cleared.
-        [self.editingDatabaseConnection
-            asyncReadWriteWithBlock:^(YapDatabaseReadWriteTransaction *_Nonnull transaction) {
-                [oldIndicatorItem.interaction touchWithTransaction:transaction];
-            }];
-    }
-
-    if (self.hasClearedUnreadMessagesIndicator) {
-        // ensureDynamicInteractionsForThread is somewhat expensive
-        // so we don't want to call it unnecessarily.
-        return;
-    }
-
-    // Once we've cleared the unread messages indicator,
-    // make sure we don't show it again.
-    self.hasClearedUnreadMessagesIndicator = YES;
-
-    if (self.dynamicInteractions.unreadIndicator) {
-        // If we've just cleared the "unread messages" indicator,
-        // update the dynamic interactions.
-        [self ensureDynamicInteractions];
-    }
+    [self.conversationViewModel ensureDynamicInteractions];
 }
 
 - (void)createConversationScrollButtons
@@ -2622,7 +2337,7 @@ typedef enum : NSUInteger {
     _hasUnreadMessages = hasUnreadMessages;
 
     self.scrollDownButton.hasUnreadMessages = hasUnreadMessages;
-    [self ensureDynamicInteractions];
+    [self.conversationViewModel ensureDynamicInteractions];
 }
 
 - (void)scrollDownButtonTapped
@@ -2673,7 +2388,7 @@ typedef enum : NSUInteger {
     BOOL isScrolledUp = scrollSpaceToBottom > pageHeight * 1.f;
 
     if (self.viewItems.count > 0) {
-        ConversationViewItem *lastViewItem = [self.viewItems lastObject];
+        id<ConversationViewItem> lastViewItem = [self.viewItems lastObject];
         OWSAssertDebug(lastViewItem);
 
         if (lastViewItem.interaction.timestampForSorting > self.lastVisibleTimestamp) {
@@ -2764,10 +2479,10 @@ typedef enum : NSUInteger {
 {
     OWSAssertDebug(attachment);
 
-    [self tryToSendAttachmentIfApproved:attachment];
+    [self showApprovalDialogForAttachment:attachment];
 
     [ThreadUtil addThreadToProfileWhitelistIfEmptyContactThread:self.thread];
-    [self ensureDynamicInteractions];
+    [self.conversationViewModel ensureDynamicInteractions];
 }
 
 - (void)messageWasSent:(TSOutgoingMessage *)message
@@ -2777,7 +2492,7 @@ typedef enum : NSUInteger {
 
     [self updateLastVisibleTimestamp:message.timestampForSorting];
     self.lastMessageSentDate = [NSDate new];
-    [self clearUnreadMessagesIndicator];
+    [self.conversationViewModel clearUnreadMessagesIndicator];
     self.inputToolbar.quotedReply = nil;
 
     if (!Environment.shared.preferences.hasSentAMessage) {
@@ -2787,6 +2502,7 @@ typedef enum : NSUInteger {
         SystemSoundID soundId = [OWSSounds systemSoundIDForSound:OWSSound_MessageSent quiet:YES];
         AudioServicesPlaySystemSound(soundId);
     }
+    [self.typingIndicators didSendOutgoingMessageInThread:self.thread];
 }
 
 #pragma mark UIDocumentMenuDelegate
@@ -2859,17 +2575,17 @@ typedef enum : NSUInteger {
 
     [dataSource setSourceFilename:filename];
 
-    // Although we want to be able to send higher quality attachments throught the document picker
+    // Although we want to be able to send higher quality attachments through the document picker
     // it's more imporant that we ensure the sent format is one all clients can accept (e.g. *not* quicktime .mov)
     if ([SignalAttachment isInvalidVideoWithDataSource:dataSource dataUTI:type]) {
-        [self sendQualityAdjustedAttachmentForVideo:url filename:filename skipApprovalDialog:NO];
+        [self showApprovalDialogAfterProcessingVideoURL:url filename:filename];
         return;
     }
 
     // "Document picker" attachments _SHOULD NOT_ be resized, if possible.
     SignalAttachment *attachment =
         [SignalAttachment attachmentWithDataSource:dataSource dataUTI:type imageQuality:TSImageQualityOriginal];
-    [self tryToSendAttachmentIfApproved:attachment];
+    [self showApprovalDialogForAttachment:attachment];
 }
 
 #pragma mark - UIImagePickerController
@@ -2921,14 +2637,24 @@ typedef enum : NSUInteger {
             OWSLogWarn(@"Media Library permission denied.");
             return;
         }
-        
-        UIImagePickerController *picker = [UIImagePickerController new];
-        picker.sourceType = UIImagePickerControllerSourceTypePhotoLibrary;
-        picker.delegate = self;
-        picker.mediaTypes = @[ (__bridge NSString *)kUTTypeImage, (__bridge NSString *)kUTTypeMovie ];
-        
+
+        UIViewController *pickerModal;
+        if (SignalAttachment.isMultiSendEnabled) {
+            OWSImagePickerGridController *picker = [OWSImagePickerGridController new];
+            picker.delegate = self;
+
+            pickerModal = [[OWSNavigationController alloc] initWithRootViewController:picker];
+        } else {
+            UIImagePickerController *picker = [UIImagePickerController new];
+            picker.sourceType = UIImagePickerControllerSourceTypePhotoLibrary;
+            picker.delegate = self;
+            picker.mediaTypes = @[ (__bridge NSString *)kUTTypeImage, (__bridge NSString *)kUTTypeMovie ];
+
+            pickerModal = picker;
+        }
+
         [self dismissKeyBoard];
-        [self presentViewController:picker animated:YES completion:nil];
+        [self presentViewController:pickerModal animated:YES completion:nil];
     }];
 }
 
@@ -2947,6 +2673,17 @@ typedef enum : NSUInteger {
     CGRect frame = [UIScreen mainScreen].bounds;
     self.view.frame = frame;
 }
+
+#pragma mark - OWSImagePickerControllerDelegate
+
+- (void)imagePicker:(OWSImagePickerGridController *)imagePicker
+    didPickImageAttachments:(NSArray<SignalAttachment *> *)attachments
+                messageText:(NSString *_Nullable)messageText
+{
+    [self tryToSendAttachments:attachments messageText:messageText];
+}
+
+#pragma mark - UIImagePickerControllerDelegate
 
 /*
  *  Fetching data from UIImagePickerController
@@ -2994,9 +2731,7 @@ typedef enum : NSUInteger {
         NSURL *videoURL = info[UIImagePickerControllerMediaURL];
         [self dismissViewControllerAnimated:YES
                                  completion:^{
-                                     [self sendQualityAdjustedAttachmentForVideo:videoURL
-                                                                        filename:filename
-                                                              skipApprovalDialog:NO];
+                                     [self showApprovalDialogAfterProcessingVideoURL:videoURL filename:filename];
                                  }];
     } else if (picker.sourceType == UIImagePickerControllerSourceTypeCamera) {
         // Static Image captured from camera
@@ -3020,7 +2755,7 @@ typedef enum : NSUInteger {
                                              [self showErrorAlertForAttachment:attachment];
                                              failedToPickAttachment(nil);
                                          } else {
-                                             [self tryToSendAttachmentIfApproved:attachment skipApprovalDialog:NO];
+                                             [self showApprovalDialogForAttachment:attachment];
                                          }
                                      } else {
                                          failedToPickAttachment(nil);
@@ -3028,6 +2763,11 @@ typedef enum : NSUInteger {
                                  }];
     } else {
         // Non-Video image picked from library
+        if (SignalAttachment.isMultiSendEnabled) {
+            OWSFailDebug(@"Only use UIImagePicker for camera/video capture. Picking media from UIImagePicker is not "
+                         @"supported. ");
+        }
+
 
         // To avoid re-encoding GIF and PNG's as JPEG we have to get the raw data of
         // the selected item vs. using the UIImagePickerControllerOriginalImage
@@ -3052,7 +2792,6 @@ typedef enum : NSUInteger {
                            NSString *_Nullable dataUTI,
                            UIImageOrientation orientation,
                            NSDictionary *_Nullable assetInfo) {
-
                            NSError *assetFetchingError = assetInfo[PHImageErrorKey];
                            if (assetFetchingError || !imageData) {
                                return failedToPickAttachment(assetFetchingError);
@@ -3074,36 +2813,10 @@ typedef enum : NSUInteger {
                                                             [self showErrorAlertForAttachment:attachment];
                                                             failedToPickAttachment(nil);
                                                         } else {
-                                                            [self tryToSendAttachmentIfApproved:attachment];
+                                                            [self showApprovalDialogForAttachment:attachment];
                                                         }
                                                     }];
                        }];
-    }
-}
-
-- (void)sendMessageAttachment:(SignalAttachment *)attachment
-{
-    OWSAssertIsOnMainThread();
-    // TODO: Should we assume non-nil or should we check for non-nil?
-    OWSAssertDebug(attachment != nil);
-    OWSAssertDebug(![attachment hasError]);
-    OWSAssertDebug([attachment mimeType].length > 0);
-
-    OWSLogVerbose(@"Sending attachment. Size in bytes: %lu, contentType: %@",
-        (unsigned long)[attachment dataLength],
-        [attachment mimeType]);
-
-    BOOL didAddToProfileWhitelist = [ThreadUtil addThreadToProfileWhitelistIfEmptyContactThread:self.thread];
-    TSOutgoingMessage *message = [ThreadUtil sendMessageWithAttachment:attachment
-                                                              inThread:self.thread
-                                                      quotedReplyModel:self.inputToolbar.quotedReply
-                                                         messageSender:self.messageSender
-                                                            completion:nil];
-
-    [self messageWasSent:message];
-
-    if (didAddToProfileWhitelist) {
-        [self ensureDynamicInteractions];
     }
 }
 
@@ -3116,27 +2829,26 @@ typedef enum : NSUInteger {
 
     BOOL didAddToProfileWhitelist = [ThreadUtil addThreadToProfileWhitelistIfEmptyContactThread:self.thread];
 
-    [self.editingDatabaseConnection asyncReadWriteWithBlock:^(YapDatabaseReadWriteTransaction *transaction) {
-        if (contactShare.avatarImage) {
-            [contactShare.dbRecord saveAvatarImage:contactShare.avatarImage transaction:transaction];
+    [self.editingDatabaseConnection
+        asyncReadWriteWithBlock:^(YapDatabaseReadWriteTransaction *transaction) {
+            // TODO - in line with QuotedReply and other message attachments, saving should happen as part of sending
+            // preparation rather than duplicated here and in the SAE
+            if (contactShare.avatarImage) {
+                [contactShare.dbRecord saveAvatarImage:contactShare.avatarImage transaction:transaction];
+            }
         }
-    }
         completionBlock:^{
-            TSOutgoingMessage *message = [ThreadUtil sendMessageWithContactShare:contactShare.dbRecord
-                                                                        inThread:self.thread
-                                                                   messageSender:self.messageSender
-                                                                      completion:nil];
+            TSOutgoingMessage *message =
+                [ThreadUtil enqueueMessageWithContactShare:contactShare.dbRecord inThread:self.thread];
             [self messageWasSent:message];
 
             if (didAddToProfileWhitelist) {
-                [self ensureDynamicInteractions];
+                [self.conversationViewModel ensureDynamicInteractions];
             }
         }];
 }
 
-- (void)sendQualityAdjustedAttachmentForVideo:(NSURL *)movieURL
-                                     filename:(nullable NSString *)filename
-                           skipApprovalDialog:(BOOL)skipApprovalDialog
+- (void)showApprovalDialogAfterProcessingVideoURL:(NSURL *)movieURL filename:(nullable NSString *)filename
 {
     OWSAssertIsOnMainThread();
 
@@ -3150,9 +2862,8 @@ typedef enum : NSUInteger {
                       VideoCompressionResult *compressionResult =
                           [SignalAttachment compressVideoAsMp4WithDataSource:dataSource
                                                                      dataUTI:(NSString *)kUTTypeMPEG4];
-                      [compressionResult.attachmentPromise retainUntilComplete];
 
-                      compressionResult.attachmentPromise.then(^(SignalAttachment *attachment) {
+                      [compressionResult.attachmentPromise.then(^(SignalAttachment *attachment) {
                           OWSAssertIsOnMainThread();
                           OWSAssertDebug([attachment isKindOfClass:[SignalAttachment class]]);
 
@@ -3166,10 +2877,10 @@ typedef enum : NSUInteger {
                                       attachment ? [attachment errorName] : @"Missing data");
                                   [self showErrorAlertForAttachment:attachment];
                               } else {
-                                  [self tryToSendAttachmentIfApproved:attachment skipApprovalDialog:skipApprovalDialog];
+                                  [self showApprovalDialogForAttachment:attachment];
                               }
                           }];
-                      });
+                      }) retainUntilComplete];
                   }];
 }
 
@@ -3183,360 +2894,6 @@ typedef enum : NSUInteger {
 - (YapDatabaseConnection *)editingDatabaseConnection
 {
     return OWSPrimaryStorage.sharedManager.dbReadWriteConnection;
-}
-
-- (void)uiDatabaseDidUpdateExternally:(NSNotification *)notification
-{
-    OWSAssertIsOnMainThread();
-
-    OWSLogVerbose(@"");
-
-    if (self.shouldObserveDBModifications) {
-        // External database modifications can't be converted into incremental updates,
-        // so rebuild everything.  This is expensive and usually isn't necessary, but
-        // there's no alternative.
-        //
-        // We don't need to do this if we're not observing db modifications since we'll
-        // do it when we resume.
-        [self resetMappings];
-    }
-}
-
-- (void)uiDatabaseWillUpdate:(NSNotification *)notification
-{
-    // HACK to work around radar #28167779
-    // "UICollectionView performBatchUpdates can trigger a crash if the collection view is flagged for layout"
-    // more: https://github.com/PSPDFKit-labs/radar.apple.com/tree/master/28167779%20-%20CollectionViewBatchingIssue
-    // This was our #2 crash, and much exacerbated by the refactoring somewhere between 2.6.2.0-2.6.3.8
-    //
-    // NOTE: It's critical we do this before beginLongLivedReadTransaction.
-    //       We want to relayout our contents using the old message mappings and
-    //       view items before they are updated.
-    [self.collectionView layoutIfNeeded];
-    // ENDHACK to work around radar #28167779
-}
-
-- (void)uiDatabaseDidUpdate:(NSNotification *)notification
-{
-    OWSAssertIsOnMainThread();
-
-    if (!self.shouldObserveDBModifications) {
-        return;
-    }
-
-    OWSLogVerbose(@"");
-
-    NSArray *notifications = notification.userInfo[OWSUIDatabaseConnectionNotificationsKey];
-    OWSAssertDebug([notifications isKindOfClass:[NSArray class]]);
-    
-    [self updateBackButtonUnreadCount];
-    [self updateNavigationBarSubtitleLabel];
-
-    if (self.isGroupConversation) {
-        [self.uiDatabaseConnection readWithBlock:^(YapDatabaseReadTransaction *transaction) {
-            TSGroupThread *gThread = (TSGroupThread *)self.thread;
-
-            if (gThread.groupModel) {
-                TSGroupThread *_Nullable updatedThread =
-                    [TSGroupThread threadWithGroupId:gThread.groupModel.groupId transaction:transaction];
-                if (updatedThread) {
-                    self.thread = updatedThread;
-                } else {
-                    OWSFailDebug(@"Could not reload thread.");
-                }
-            }
-        }];
-        [self updateNavigationTitle];
-    }
-
-    [self updateDisappearingMessagesConfiguration];
-
-    if (![[self.uiDatabaseConnection ext:TSMessageDatabaseViewExtensionName] hasChangesForGroup:self.thread.uniqueId
-                                                                                inNotifications:notifications]) {
-        [self.uiDatabaseConnection readWithBlock:^(YapDatabaseReadTransaction *transaction) {
-            [self.messageMappings updateWithTransaction:transaction];
-        }];
-        return;
-    }
-
-    NSArray<YapDatabaseViewSectionChange *> *sectionChanges = nil;
-    NSArray<YapDatabaseViewRowChange *> *rowChanges = nil;
-    [[self.uiDatabaseConnection ext:TSMessageDatabaseViewExtensionName] getSectionChanges:&sectionChanges
-                                                                               rowChanges:&rowChanges
-                                                                         forNotifications:notifications
-                                                                             withMappings:self.messageMappings];
-
-    if ([sectionChanges count] == 0 && [rowChanges count] == 0) {
-        // YapDatabase will ignore insertions within the message mapping's
-        // range that are not within the current mapping's contents.  We
-        // may need to extend the mapping's contents to reflect the current
-        // range.
-        [self updateMessageMappingRangeOptions];
-        // Calling resetContentAndLayout is a bit expensive.
-        // Since by definition this won't affect any cells in the previous
-        // range, it should be sufficient to call invalidateLayout.
-        //
-        // TODO: Investigate whether we can just call invalidateLayout.
-        [self resetContentAndLayout];
-        return;
-    }
-
-    // We need to reload any modified interactions _before_ we call
-    // reloadViewItems.
-    BOOL hasMalformedRowChange = NO;
-    for (YapDatabaseViewRowChange *rowChange in rowChanges) {
-        switch (rowChange.type) {
-            case YapDatabaseViewChangeUpdate: {
-                YapCollectionKey *collectionKey = rowChange.collectionKey;
-                if (collectionKey.key) {
-                    ConversationViewItem *_Nullable viewItem = self.viewItemCache[collectionKey.key];
-                    if (viewItem) {
-                        [self reloadInteractionForViewItem:viewItem];
-                    } else {
-                        hasMalformedRowChange = YES;
-                    }
-                } else if (rowChange.indexPath && rowChange.originalIndex < self.viewItems.count) {
-                    // Do nothing, this is a pseudo-update generated due to
-                    // setCellDrawingDependencyOffsets.
-                    OWSAssertDebug(rowChange.changes == YapDatabaseViewChangedDependency);
-                } else {
-                    hasMalformedRowChange = YES;
-                }
-                break;
-            }
-            case YapDatabaseViewChangeDelete: {
-                // Discard cached view items after deletes.
-                YapCollectionKey *collectionKey = rowChange.collectionKey;
-                if (collectionKey.key) {
-                    [self.viewItemCache removeObjectForKey:collectionKey.key];
-                } else {
-                    hasMalformedRowChange = YES;
-                }
-                break;
-            }
-            default:
-                break;
-        }
-        if (hasMalformedRowChange) {
-            break;
-        }
-    }
-
-    if (hasMalformedRowChange) {
-        // These errors seems to be very rare; they can only be reproduced
-        // using the more extreme actions in the debug UI.
-        OWSFailDebug(@"hasMalformedRowChange");
-        [self resetMappings];
-        [self updateLastVisibleTimestamp];
-        [self scrollToBottomAnimated:NO];
-        return;
-    }
-
-    NSUInteger oldViewItemCount = self.viewItems.count;
-    if (![self reloadViewItems]) {
-        // These errors are rare.
-        OWSFailDebug(@"could not reload view items; hard resetting message mappings.");
-        [self resetMappings];
-        [self updateLastVisibleTimestamp];
-        [self scrollToBottomAnimated:NO];
-        return;
-    }
-
-    BOOL wasAtBottom = [self isScrolledToBottom];
-    // We want sending messages to feel snappy.  So, if the only
-    // update is a new outgoing message AND we're already scrolled to
-    // the bottom of the conversation, skip the scroll animation.
-    __block BOOL shouldAnimateScrollToBottom = !wasAtBottom;
-    // We want to scroll to the bottom if the user:
-    //
-    // a) already was at the bottom of the conversation.
-    // b) is inserting new interactions.
-    __block BOOL scrollToBottom = wasAtBottom;
-
-    void (^batchUpdates)(void) = ^{
-        for (YapDatabaseViewRowChange *rowChange in rowChanges) {
-            switch (rowChange.type) {
-                case YapDatabaseViewChangeDelete: {
-                    OWSLogVerbose(@"YapDatabaseViewChangeDelete collectionKey: %@, indexPath: %@, finalIndex: %lu",
-                        rowChange.collectionKey,
-                        rowChange.indexPath,
-                        (unsigned long)rowChange.finalIndex);
-                    [self.collectionView deleteItemsAtIndexPaths:@[ rowChange.indexPath ]];
-                    YapCollectionKey *collectionKey = rowChange.collectionKey;
-                    OWSAssertDebug(collectionKey.key.length > 0);
-                    break;
-                }
-                case YapDatabaseViewChangeInsert: {
-                    OWSLogVerbose(@"YapDatabaseViewChangeInsert collectionKey: %@, newIndexPath: %@, finalIndex: %lu",
-                        rowChange.collectionKey,
-                        rowChange.newIndexPath,
-                        (unsigned long)rowChange.finalIndex);
-                    [self.collectionView insertItemsAtIndexPaths:@[ rowChange.newIndexPath ]];
-
-                    ConversationViewItem *_Nullable viewItem = [self viewItemForIndex:(NSInteger)rowChange.finalIndex];
-                    if ([viewItem.interaction isKindOfClass:[TSOutgoingMessage class]]) {
-                        TSOutgoingMessage *outgoingMessage = (TSOutgoingMessage *)viewItem.interaction;
-                        if (!outgoingMessage.isFromLinkedDevice) {
-                            scrollToBottom = YES;
-                            shouldAnimateScrollToBottom = NO;
-                        }
-                    }
-                    break;
-                }
-                case YapDatabaseViewChangeMove: {
-                    OWSLogVerbose(@"YapDatabaseViewChangeMove collectionKey: %@, indexPath: %@, newIndexPath: %@, "
-                                  @"finalIndex: %lu",
-                        rowChange.collectionKey,
-                        rowChange.indexPath,
-                        rowChange.newIndexPath,
-                        (unsigned long)rowChange.finalIndex);
-                    [self.collectionView moveItemAtIndexPath:rowChange.indexPath toIndexPath:rowChange.newIndexPath];
-                    break;
-                }
-                case YapDatabaseViewChangeUpdate: {
-                    OWSLogVerbose(@"YapDatabaseViewChangeUpdate collectionKey: %@, indexPath: %@, finalIndex: %lu",
-                        rowChange.collectionKey,
-                        rowChange.indexPath,
-                        (unsigned long)rowChange.finalIndex);
-                    [self.collectionView reloadItemsAtIndexPaths:@[ rowChange.indexPath ]];
-                    break;
-                }
-            }
-        }
-    };
-
-    OWSLogVerbose(@"self.viewItems.count: %zd -> %zd", oldViewItemCount, self.viewItems.count);
-
-    BOOL shouldAnimateUpdates = [self shouldAnimateRowUpdates:rowChanges oldViewItemCount:oldViewItemCount];
-    void (^batchUpdatesCompletion)(BOOL) = ^(BOOL finished) {
-        OWSAssertIsOnMainThread();
-        
-        
-        if (!finished) {
-            OWSLogInfo(@"performBatchUpdates did not finish");
-        }
-        
-        [self updateLastVisibleTimestamp];
-
-        if (scrollToBottom && shouldAnimateUpdates) {
-            [self scrollToBottomAnimated:shouldAnimateScrollToBottom];
-        }
-    };
-
-    @try {
-        if (shouldAnimateUpdates) {
-            [self.collectionView performBatchUpdates:batchUpdates completion:batchUpdatesCompletion];
-        } else {
-            // HACK: We use `UIView.animateWithDuration:0` rather than `UIView.performWithAnimation` to work around a
-            // UIKit Crash like:
-            //
-            //     *** Assertion failure in -[ConversationViewLayout prepareForCollectionViewUpdates:],
-            //     /BuildRoot/Library/Caches/com.apple.xbs/Sources/UIKit_Sim/UIKit-3600.7.47/UICollectionViewLayout.m:760
-            //     *** Terminating app due to uncaught exception 'NSInternalInconsistencyException', reason: 'While
-            //     preparing update a visible view at <NSIndexPath: 0xc000000011c00016> {length = 2, path = 0 - 142}
-            //     wasn't found in the current data model and was not in an update animation. This is an internal
-            //     error.'
-            //
-            // I'm unclear if this is a bug in UIKit, or if we're doing something crazy in
-            // ConversationViewLayout#prepareLayout. To reproduce, rapidily insert and delete items into the
-            // conversation. See `DebugUIMessages#thrashCellsInThread:`
-            [UIView
-                animateWithDuration:0.0
-                         animations:^{
-                             [self.collectionView performBatchUpdates:batchUpdates completion:batchUpdatesCompletion];
-                             if (scrollToBottom) {
-                                 [self scrollToBottomAnimated:shouldAnimateUpdates];
-                             }
-                         }];
-        }
-    } @catch (NSException *exception) {
-        OWSFailDebug(@"exception: %@ of type: %@ with reason: %@, user info: %@.",
-            exception.description,
-            exception.name,
-            exception.reason,
-            exception.userInfo);
-
-        for (YapDatabaseViewRowChange *rowChange in rowChanges) {
-            switch (rowChange.type) {
-                case YapDatabaseViewChangeDelete:
-                    OWSLogWarn(@"YapDatabaseViewChangeDelete collectionKey: %@, indexPath: %@, finalIndex: %lu",
-                        rowChange.collectionKey,
-                        rowChange.indexPath,
-                        (unsigned long)rowChange.finalIndex);
-                    break;
-                case YapDatabaseViewChangeInsert:
-                    OWSLogWarn(@"YapDatabaseViewChangeInsert collectionKey: %@, newIndexPath: %@, finalIndex: %lu",
-                        rowChange.collectionKey,
-                        rowChange.newIndexPath,
-                        (unsigned long)rowChange.finalIndex);
-                    break;
-                case YapDatabaseViewChangeMove:
-                    OWSLogWarn(@"YapDatabaseViewChangeMove collectionKey: %@, indexPath: %@, finalIndex: %@, "
-                               @"finalIndex: %lu",
-                        rowChange.collectionKey,
-                        rowChange.indexPath,
-                        rowChange.newIndexPath,
-                        (unsigned long)rowChange.finalIndex);
-                    break;
-                case YapDatabaseViewChangeUpdate:
-                    OWSLogWarn(@"YapDatabaseViewChangeUpdate collectionKey: %@, indexPath: %@, finalIndex: %lu, "
-                               @"isDependency: %d",
-                        rowChange.collectionKey,
-                        rowChange.indexPath,
-                        (unsigned long)rowChange.finalIndex,
-                        rowChange.changes == YapDatabaseViewChangedDependency);
-                    break;
-            }
-        }
-
-        @throw exception;
-    }
-
-    self.lastReloadDate = [NSDate new];
-}
-
-- (BOOL)shouldAnimateRowUpdates:(NSArray<YapDatabaseViewRowChange *> *)rowChanges
-               oldViewItemCount:(NSUInteger)oldViewItemCount
-{
-    OWSAssertDebug(rowChanges);
-
-    // If user sends a new outgoing message, don't animate the change.
-    BOOL isOnlyModifyingLastMessage = YES;
-    for (YapDatabaseViewRowChange *rowChange in rowChanges) {
-        switch (rowChange.type) {
-            case YapDatabaseViewChangeDelete:
-                isOnlyModifyingLastMessage = NO;
-                break;
-            case YapDatabaseViewChangeInsert: {
-                ConversationViewItem *_Nullable viewItem = [self viewItemForIndex:(NSInteger)rowChange.finalIndex];
-                if (([viewItem.interaction isKindOfClass:[TSIncomingMessage class]] ||
-                        [viewItem.interaction isKindOfClass:[TSOutgoingMessage class]])
-                    && rowChange.finalIndex >= oldViewItemCount) {
-                    continue;
-                }
-                isOnlyModifyingLastMessage = NO;
-                break;
-            }
-            case YapDatabaseViewChangeMove:
-                isOnlyModifyingLastMessage = NO;
-                break;
-            case YapDatabaseViewChangeUpdate: {
-                if (rowChange.changes == YapDatabaseViewChangedDependency) {
-                    continue;
-                }
-                ConversationViewItem *_Nullable viewItem = [self viewItemForIndex:(NSInteger)rowChange.finalIndex];
-                if (([viewItem.interaction isKindOfClass:[TSIncomingMessage class]] ||
-                        [viewItem.interaction isKindOfClass:[TSOutgoingMessage class]])
-                    && rowChange.finalIndex >= oldViewItemCount) {
-                    continue;
-                }
-                isOnlyModifyingLastMessage = NO;
-                break;
-            }
-        }
-    }
-    BOOL shouldAnimateRowUpdates = !isOnlyModifyingLastMessage;
-    return shouldAnimateRowUpdates;
 }
 
 - (BOOL)isScrolledToBottom
@@ -3584,13 +2941,13 @@ typedef enum : NSUInteger {
         if (!strongSelf) {
             return;
         }
-        
+
         if (strongSelf.voiceMessageUUID != voiceMessageUUID) {
             // This voice message recording has been cancelled
             // before recording could begin.
             return;
         }
-        
+
         if (granted) {
             [strongSelf startRecordingVoiceMemo];
         } else {
@@ -3611,13 +2968,13 @@ typedef enum : NSUInteger {
     [self.audioAttachmentPlayer stop];
     self.audioAttachmentPlayer = nil;
 
-    NSString *temporaryDirectory = NSTemporaryDirectory();
+    NSString *temporaryDirectory = OWSTemporaryDirectory();
     NSString *filename = [NSString stringWithFormat:@"%lld.m4a", [NSDate ows_millisecondTimeStamp]];
     NSString *filepath = [temporaryDirectory stringByAppendingPathComponent:filename];
     NSURL *fileURL = [NSURL fileURLWithPath:filepath];
 
     // Setup audio session
-    BOOL configuredAudio = [OWSAudioSession.shared startRecordingAudioActivity:self.voiceNoteAudioActivity];
+    BOOL configuredAudio = [self.audioSession startAudioActivity:self.recordVoiceNoteAudioActivity];
     if (!configuredAudio) {
         OWSFailDebug(@"Couldn't configure audio session");
         [self cancelVoiceMemo];
@@ -3711,14 +3068,14 @@ typedef enum : NSUInteger {
         OWSLogWarn(@"Invalid attachment: %@.", attachment ? [attachment errorName] : @"Missing data");
         [self showErrorAlertForAttachment:attachment];
     } else {
-        [self tryToSendAttachmentIfApproved:attachment skipApprovalDialog:YES];
+        [self tryToSendAttachments:@[ attachment ] messageText:nil];
     }
 }
 
 - (void)stopRecording
 {
     [self.audioRecorder stop];
-    [OWSAudioSession.shared endAudioActivity:self.voiceNoteAudioActivity];
+    [self.audioSession endAudioActivity:self.recordVoiceNoteAudioActivity];
 }
 
 - (void)cancelRecordingVoiceMemo
@@ -3855,7 +3212,7 @@ typedef enum : NSUInteger {
     return lastVisibleIndexPath;
 }
 
-- (nullable ConversationViewItem *)lastVisibleViewItem
+- (nullable id<ConversationViewItem>)lastVisibleViewItem
 {
     NSIndexPath *_Nullable lastVisibleIndexPath = [self lastVisibleIndexPath];
     if (!lastVisibleIndexPath) {
@@ -3870,7 +3227,7 @@ typedef enum : NSUInteger {
 - (void)didScrollToBottom
 {
 
-    ConversationViewItem *_Nullable lastVisibleViewItem = [self.viewItems lastObject];
+    id<ConversationViewItem> _Nullable lastVisibleViewItem = [self.viewItems lastObject];
     if (lastVisibleViewItem) {
         uint64_t lastVisibleTimestamp = lastVisibleViewItem.interaction.timestampForSorting;
         self.lastVisibleTimestamp = MAX(self.lastVisibleTimestamp, lastVisibleTimestamp);
@@ -3883,7 +3240,7 @@ typedef enum : NSUInteger {
 
 - (void)updateLastVisibleTimestamp
 {
-    ConversationViewItem *_Nullable lastVisibleViewItem = [self lastVisibleViewItem];
+    id<ConversationViewItem> _Nullable lastVisibleViewItem = [self lastVisibleViewItem];
     if (lastVisibleViewItem) {
         uint64_t lastVisibleTimestamp = lastVisibleViewItem.interaction.timestampForSorting;
         self.lastVisibleTimestamp = MAX(self.lastVisibleTimestamp, lastVisibleTimestamp);
@@ -3960,7 +3317,10 @@ typedef enum : NSUInteger {
     if (newGroupModel.groupImage) {
         NSData *data = UIImagePNGRepresentation(newGroupModel.groupImage);
         DataSource *_Nullable dataSource = [DataSourceValue dataSourceWithData:data fileExtension:@"png"];
-        [self.messageSender enqueueTemporaryAttachment:dataSource
+        // DURABLE CLEANUP - currently one caller uses the completion handler to delete the tappable error message
+        // which causes this code to be called. Once we're more aggressive about durable sending retry,
+        // we could get rid of this "retryable tappable error message".
+        [self.messageSender sendTemporaryAttachment:dataSource
             contentType:OWSMimeTypeImagePng
             inMessage:message
             success:^{
@@ -3973,7 +3333,10 @@ typedef enum : NSUInteger {
                 OWSLogError(@"Failed to send group avatar update with error: %@", error);
             }];
     } else {
-        [self.messageSender enqueueMessage:message
+        // DURABLE CLEANUP - currently one caller uses the completion handler to delete the tappable error message
+        // which causes this code to be called. Once we're more aggressive about durable sending retry,
+        // we could get rid of this "retryable tappable error message".
+        [self.messageSender sendMessage:message
             success:^{
                 OWSLogDebug(@"Successfully sent group update");
                 if (successCompletion) {
@@ -4083,6 +3446,13 @@ typedef enum : NSUInteger {
 
 #pragma mark - ConversationInputTextViewDelegate
 
+- (void)textViewDidChange:(UITextView *)textView
+{
+    if (textView.text.length > 0) {
+        [self.typingIndicators didStartTypingOutgoingInputInThread:self.thread];
+    }
+}
+
 - (void)inputTextViewSendMessagePressed
 {
     [self sendButtonPressed];
@@ -4092,16 +3462,28 @@ typedef enum : NSUInteger {
 {
     OWSLogError(@"");
 
-    [self tryToSendAttachmentIfApproved:attachment];
+    [self showApprovalDialogForAttachment:attachment];
 }
 
-- (void)tryToSendAttachmentIfApproved:(SignalAttachment *_Nullable)attachment
+- (void)showApprovalDialogForAttachment:(SignalAttachment *_Nullable)attachment
 {
-    [self tryToSendAttachmentIfApproved:attachment skipApprovalDialog:NO];
+    if (attachment == nil) {
+        OWSFailDebug(@"attachment was unexpectedly nil");
+        [self showErrorAlertForAttachment:nil];
+        return;
+    }
+    [self showApprovalDialogForAttachments:@[ attachment ]];
 }
 
-- (void)tryToSendAttachmentIfApproved:(SignalAttachment *_Nullable)attachment
-                   skipApprovalDialog:(BOOL)skipApprovalDialog
+- (void)showApprovalDialogForAttachments:(NSArray<SignalAttachment *> *)attachments
+{
+    OWSNavigationController *modal =
+        [AttachmentApprovalViewController wrappedInNavControllerWithAttachments:attachments approvalDelegate:self];
+
+    [self presentViewController:modal animated:YES completion:nil];
+}
+
+- (void)tryToSendAttachments:(NSArray<SignalAttachment *> *)attachments messageText:(NSString *_Nullable)messageText
 {
     OWSLogError(@"");
 
@@ -4110,7 +3492,7 @@ typedef enum : NSUInteger {
         if ([self isBlockedConversation]) {
             [self showUnblockConversationUI:^(BOOL isBlocked) {
                 if (!isBlocked) {
-                    [weakSelf tryToSendAttachmentIfApproved:attachment];
+                    [weakSelf tryToSendAttachments:attachments messageText:messageText];
                 }
             }];
             return;
@@ -4120,23 +3502,32 @@ typedef enum : NSUInteger {
             showSafetyNumberConfirmationIfNecessaryWithConfirmationText:[SafetyNumberStrings confirmSendButton]
                                                              completion:^(BOOL didConfirmIdentity) {
                                                                  if (didConfirmIdentity) {
-                                                                     [weakSelf
-                                                                         tryToSendAttachmentIfApproved:attachment];
+                                                                     [weakSelf tryToSendAttachments:attachments
+                                                                                        messageText:messageText];
                                                                  }
                                                              }];
         if (didShowSNAlert) {
             return;
         }
 
-        if (attachment == nil || [attachment hasError]) {
-            OWSLogWarn(@"Invalid attachment: %@.", attachment ? [attachment errorName] : @"Missing data");
-            [self showErrorAlertForAttachment:attachment];
-        } else if (skipApprovalDialog) {
-            [self sendMessageAttachment:attachment];
-        } else {
-            OWSNavigationController *modal =
-                [AttachmentApprovalViewController wrappedInNavControllerWithAttachment:attachment delegate:self];
-            [self presentViewController:modal animated:YES completion:nil];
+        for (SignalAttachment *attachment in attachments) {
+            if ([attachment hasError]) {
+                OWSLogWarn(@"Invalid attachment: %@.", attachment ? [attachment errorName] : @"Missing data");
+                [self showErrorAlertForAttachment:attachment];
+                return;
+            }
+        }
+
+        BOOL didAddToProfileWhitelist = [ThreadUtil addThreadToProfileWhitelistIfEmptyContactThread:self.thread];
+        TSOutgoingMessage *message = [ThreadUtil enqueueMessageWithAttachments:attachments
+                                                                   messageBody:messageText
+                                                                      inThread:self.thread
+                                                              quotedReplyModel:self.inputToolbar.quotedReply];
+
+        [self messageWasSent:message];
+
+        if (didAddToProfileWhitelist) {
+            [self.conversationViewModel ensureDynamicInteractions];
         }
     });
 }
@@ -4245,18 +3636,23 @@ typedef enum : NSUInteger {
     [self updateNavigationBarSubtitleLabel];
 }
 
-- (void)attachmentApproval:(AttachmentApprovalViewController *)attachmentApproval didApproveAttachment:(SignalAttachment * _Nonnull)attachment
+#pragma mark - AttachmentApprovalViewControllerDelegate
+
+- (void)attachmentApproval:(AttachmentApprovalViewController *)attachmentApproval
+     didApproveAttachments:(NSArray<SignalAttachment *> *)attachments
+               messageText:(NSString *_Nullable)messageText
 {
-    [self sendMessageAttachment:attachment];
+    [self tryToSendAttachments:attachments messageText:messageText];
     [self dismissViewControllerAnimated:YES completion:nil];
     // We always want to scroll to the bottom of the conversation after the local user
     // sends a message.  Normally, this is taken care of in yapDatabaseModified:, but
     // we don't listen to db modifications when this view isn't visible, i.e. when the
     // attachment approval view is presented.
-    [self scrollToBottomAnimated:YES];
+    [self scrollToBottomAnimated:NO];
 }
 
-- (void)attachmentApproval:(AttachmentApprovalViewController *)attachmentApproval didCancelAttachment:(SignalAttachment * _Nonnull)attachment
+- (void)attachmentApproval:(AttachmentApprovalViewController *)attachmentApproval
+      didCancelAttachments:(NSArray<SignalAttachment *> *)attachment
 {
     [self dismissViewControllerAnimated:YES completion:nil];
 }
@@ -4320,7 +3716,7 @@ typedef enum : NSUInteger {
 
     CGFloat dstY = MAX(firstContentPageTop, lastContentPageTop);
 
-    [self.collectionView setContentOffset:CGPointMake(0, dstY) animated:NO];
+    [self.collectionView setContentOffset:CGPointMake(0, dstY) animated:animated];
     [self didScrollToBottom];
 }
 
@@ -4329,7 +3725,11 @@ typedef enum : NSUInteger {
 - (void)scrollViewDidScroll:(UIScrollView *)scrollView
 {
     [self updateLastVisibleTimestamp];
-    [self autoLoadMoreIfNecessary];
+
+    __weak ConversationViewController *weakSelf = self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [weakSelf autoLoadMoreIfNecessary];
+    });
 }
 
 - (void)scrollViewWillBeginDragging:(UIScrollView *)scrollView
@@ -4446,7 +3846,7 @@ typedef enum : NSUInteger {
     // We convert large text messages to attachments
     // which are presented as normal text messages.
     BOOL didAddToProfileWhitelist = [ThreadUtil addThreadToProfileWhitelistIfEmptyContactThread:self.thread];
-    TSOutgoingMessage *message;
+    __block TSOutgoingMessage *message;
 
     if ([text lengthOfBytesUsingEncoding:NSUTF8StringEncoding] >= kOversizeTextMessageSizeThreshold) {
         DataSource *_Nullable dataSource = [DataSourceValue dataSourceWithOversizeText:text];
@@ -4455,16 +3855,16 @@ typedef enum : NSUInteger {
         // TODO we should redundantly send the first n chars in the body field so it can be viewed
         // on clients that don't support oversized text messgaes, (and potentially generate a preview
         // before the attachment is downloaded)
-        message = [ThreadUtil sendMessageWithAttachment:attachment
-                                               inThread:self.thread
-                                       quotedReplyModel:self.inputToolbar.quotedReply
-                                          messageSender:self.messageSender
-                                             completion:nil];
+        message = [ThreadUtil enqueueMessageWithAttachment:attachment
+                                                  inThread:self.thread
+                                          quotedReplyModel:self.inputToolbar.quotedReply];
     } else {
-        message = [ThreadUtil sendMessageWithText:text
-                                         inThread:self.thread
-                                 quotedReplyModel:self.inputToolbar.quotedReply
-                                    messageSender:self.messageSender];
+        [self.editingDatabaseConnection readWriteWithBlock:^(YapDatabaseReadWriteTransaction *_Nonnull transaction) {
+            message = [ThreadUtil enqueueMessageWithText:text
+                                                inThread:self.thread
+                                        quotedReplyModel:self.inputToolbar.quotedReply
+                                             transaction:transaction];
+        }];
     }
 
     [self messageWasSent:message];
@@ -4475,7 +3875,7 @@ typedef enum : NSUInteger {
     [self.inputToolbar clearTextMessageAnimated:YES];
     [self clearDraft];
     if (didAddToProfileWhitelist) {
-        [self ensureDynamicInteractions];
+        [self.conversationViewModel ensureDynamicInteractions];
     }
 }
 
@@ -4552,7 +3952,7 @@ typedef enum : NSUInteger {
 {
     _isViewVisible = isViewVisible;
 
-    [self updateShouldObserveDBModifications];
+    [self updateShouldObserveVMUpdates];
     [self updateCellsVisible];
 }
 
@@ -4565,74 +3965,48 @@ typedef enum : NSUInteger {
     }
 }
 
-- (void)updateShouldObserveDBModifications
+- (void)updateShouldObserveVMUpdates
 {
     if (!CurrentAppContext().isAppForegroundAndActive) {
-        self.shouldObserveDBModifications = NO;
+        self.shouldObserveVMUpdates = NO;
         return;
     }
 
     if (!self.isViewVisible) {
-        self.shouldObserveDBModifications = NO;
+        self.shouldObserveVMUpdates = NO;
         return;
     }
 
     if (OWSWindowManager.sharedManager.isPresentingMenuActions) {
-        self.shouldObserveDBModifications = NO;
+        self.shouldObserveVMUpdates = NO;
         return;
     }
 
-    self.shouldObserveDBModifications = YES;
+    self.shouldObserveVMUpdates = YES;
 }
 
-- (void)setShouldObserveDBModifications:(BOOL)shouldObserveDBModifications
+- (void)setShouldObserveVMUpdates:(BOOL)shouldObserveVMUpdates
 {
-    if (_shouldObserveDBModifications == shouldObserveDBModifications) {
+    if (_shouldObserveVMUpdates == shouldObserveVMUpdates) {
         return;
     }
 
-    _shouldObserveDBModifications = shouldObserveDBModifications;
+    _shouldObserveVMUpdates = shouldObserveVMUpdates;
 
-    if (self.shouldObserveDBModifications) {
-        OWSLogVerbose(@"resume observation of database modifications.");
-        // We need to call resetMappings when we _resume_ observing DB modifications,
-        // since we've been ignore DB modifications so the mappings can be wrong.
-        //
-        // resetMappings can however have the side effect of increasing the mapping's
-        // "window" size.  If that happens, we need to restore the scroll state.
+    if (self.shouldObserveVMUpdates) {
+        OWSLogVerbose(@"resume observation of view model.");
 
-        // Snapshot the scroll state by measuring the "distance from top of view to
-        // bottom of content"; if the mapping's "window" size grows, it will grow
-        // _upward_.
-        CGFloat viewTopToContentBottom = 0;
-        OWSAssertDebug([self.collectionView.collectionViewLayout isKindOfClass:[ConversationViewLayout class]]);
-        ConversationViewLayout *conversationViewLayout
-            = (ConversationViewLayout *)self.collectionView.collectionViewLayout;
-        // To avoid laying out the collection view during initial view
-        // presentation, don't trigger layout here (via safeContentHeight)
-        // until layout has been done at least once.
-        if (conversationViewLayout.hasEverHadLayout) {
-            viewTopToContentBottom = self.safeContentHeight - self.collectionView.contentOffset.y;
-        }
-
-        NSUInteger oldCellCount = [self.messageMappings numberOfItemsInGroup:self.thread.uniqueId];
-
-        // ViewItems modified while we were not observing may be stale.
-        //
-        // TODO: have a more fine-grained cache expiration based on rows modified.
-        [self.viewItemCache removeAllObjects];
-        
-        // Snapshot the "previousLastTimestamp" value; it will be cleared by resetMappings.
-        NSNumber *_Nullable previousLastTimestamp = self.previousLastTimestamp;
-
-        [self resetMappings];
-
-        NSUInteger newCellCount = [self.messageMappings numberOfItemsInGroup:self.thread.uniqueId];
+        [self resetContentAndLayout];
+        [self updateBackButtonUnreadCount];
+        [self updateNavigationBarSubtitleLabel];
+        [self updateDisappearingMessagesConfiguration];
 
         // Detect changes in the mapping's "window" size.
-        if (oldCellCount != newCellCount) {
+        if (self.previousViewTopToContentBottom && self.previousViewItemCount
+            && self.previousViewItemCount.unsignedIntegerValue != self.viewItems.count) {
             CGFloat newContentHeight = self.safeContentHeight;
-            CGPoint newContentOffset = CGPointMake(0, MAX(0, newContentHeight - viewTopToContentBottom));
+            CGPoint newContentOffset
+                = CGPointMake(0, MAX(0, newContentHeight - self.previousViewTopToContentBottom.floatValue));
             [self.collectionView setContentOffset:newContentOffset animated:NO];
         }
 
@@ -4640,9 +4014,9 @@ typedef enum : NSUInteger {
         // any new items inserted while we were not observing.  We therefore find the
         // first item at or after the "view horizon".  See the comments below which explain
         // the "view horizon".
-        ConversationViewItem *_Nullable lastViewItem = self.viewItems.lastObject;
-        BOOL hasAddedNewItems = (lastViewItem && previousLastTimestamp
-            && lastViewItem.interaction.timestamp > previousLastTimestamp.unsignedLongLongValue);
+        id<ConversationViewItem> _Nullable lastViewItem = self.viewItems.lastObject;
+        BOOL hasAddedNewItems = (lastViewItem && self.previousLastTimestamp
+            && lastViewItem.interaction.timestamp > self.previousLastTimestamp.unsignedLongLongValue);
 
         OWSLogInfo(@"hasAddedNewItems: %d", hasAddedNewItems);
         if (hasAddedNewItems) {
@@ -4659,9 +4033,9 @@ typedef enum : NSUInteger {
             }
         }
         self.viewHorizonTimestamp = nil;
-        OWSLogVerbose(@"resumed observation of database modifications.");
+        OWSLogVerbose(@"resumed observation of view model.");
     } else {
-        OWSLogVerbose(@"pausing observation of database modifications.");
+        OWSLogVerbose(@"pausing observation of view model.");
         // When stopping observation, try to record the timestamp of the "view horizon".
         // The "view horizon" is where we'll want to focus the users when we resume
         // observation if any changes have happened while we weren't observing.
@@ -4671,12 +4045,15 @@ typedef enum : NSUInteger {
         // We'll use this later to update the view to reflect any changes made while
         // we were not observing the database.  See extendRangeToIncludeUnobservedItems
         // and the logic above.
-        ConversationViewItem *_Nullable lastViewItem = self.viewItems.lastObject;
+        id<ConversationViewItem> _Nullable lastViewItem = self.viewItems.lastObject;
         if (lastViewItem) {
             self.previousLastTimestamp = @(lastViewItem.interaction.timestamp);
+            self.previousViewItemCount = @(self.viewItems.count);
         } else {
             self.previousLastTimestamp = nil;
+            self.previousViewItemCount = nil;
         }
+
         __block TSInteraction *_Nullable firstUnseenInteraction = nil;
         [self.uiDatabaseConnection readWithBlock:^(YapDatabaseReadTransaction *transaction) {
             firstUnseenInteraction =
@@ -4691,13 +4068,29 @@ typedef enum : NSUInteger {
         } else {
             self.viewHorizonTimestamp = nil;
         }
-        OWSLogVerbose(@"paused observation of database modifications.");
+
+        // Snapshot the scroll state by measuring the "distance from top of view to
+        // bottom of content"; if the mapping's "window" size grows, it will grow
+        // _upward_.
+        OWSAssertDebug([self.collectionView.collectionViewLayout isKindOfClass:[ConversationViewLayout class]]);
+        ConversationViewLayout *conversationViewLayout
+            = (ConversationViewLayout *)self.collectionView.collectionViewLayout;
+        // To avoid laying out the collection view during initial view
+        // presentation, don't trigger layout here (via safeContentHeight)
+        // until layout has been done at least once.
+        if (conversationViewLayout.hasEverHadLayout) {
+            self.previousViewTopToContentBottom = @(self.safeContentHeight - self.collectionView.contentOffset.y);
+        } else {
+            self.previousViewTopToContentBottom = nil;
+        }
+
+        OWSLogVerbose(@"paused observation of view model.");
     }
 }
 
 - (nullable NSIndexPath *)firstIndexPathAtViewHorizonTimestamp
 {
-    OWSAssertDebug(self.shouldObserveDBModifications);
+    OWSAssertDebug(self.shouldObserveVMUpdates);
 
     if (!self.viewHorizonTimestamp) {
         return nil;
@@ -4717,7 +4110,7 @@ typedef enum : NSUInteger {
         NSUInteger mid = (left + right) / 2;
         OWSAssertDebug(left <= mid);
         OWSAssertDebug(mid < right);
-        ConversationViewItem *viewItem  = self.viewItems[mid];
+        id<ConversationViewItem> viewItem = self.viewItems[mid];
         if (viewItem.interaction.timestamp >= viewHorizonTimestamp) {
             right = mid;
         } else {
@@ -4726,7 +4119,7 @@ typedef enum : NSUInteger {
         }
     }
     OWSAssertDebug(left == right);
-    ConversationViewItem *viewItem  = self.viewItems[left];
+    id<ConversationViewItem> viewItem = self.viewItems[left];
     if (viewItem.interaction.timestamp >= viewHorizonTimestamp) {
         OWSLogInfo(@"firstIndexPathAtViewHorizonTimestamp: %zd / %zd", left, self.viewItems.count);
         return [NSIndexPath indexPathForRow:(NSInteger) left inSection:0];
@@ -4734,107 +4127,6 @@ typedef enum : NSUInteger {
         OWSLogInfo(@"firstIndexPathAtViewHorizonTimestamp: none / %zd", self.viewItems.count);
         return nil;
     }
-}
-
-// We stop observing database modifications when the app or this view is not visible
-// (see: shouldObserveDBModifications).  When we resume observing db modifications,
-// we want to extend the "range" of this view to include any items added to this
-// thread while we were not observing.
-- (void)extendRangeToIncludeUnobservedItems
-{
-    if (!self.shouldObserveDBModifications) {
-        return;
-    }
-    if (!self.previousLastTimestamp) {
-        return;
-    }
-
-    uint64_t previousLastTimestamp = self.previousLastTimestamp.unsignedLongLongValue;
-    __block NSUInteger addedItemCount = 0;
-    [self.uiDatabaseConnection readWithBlock:^(YapDatabaseReadTransaction *transaction) {
-        [[transaction ext:TSMessageDatabaseViewExtensionName]
-         enumerateRowsInGroup:self.thread.uniqueId
-         withOptions:NSEnumerationReverse
-         usingBlock:^(NSString *collection,
-                      NSString *key,
-                      id object,
-                      id metadata,
-                      NSUInteger index,
-                      BOOL *stop) {
-             
-             if (![object isKindOfClass:[TSInteraction class]]) {
-                 OWSFailDebug(@"Expected a TSInteraction: %@", [object class]);
-                 return;
-             }
-             
-             TSInteraction *interaction = (TSInteraction *)object;
-             if (interaction.timestamp <= previousLastTimestamp) {
-                 *stop = YES;
-                 return;
-             }
-             
-             addedItemCount++;
-         }];
-    }];
-    OWSLogInfo(@"extendRangeToIncludeUnobservedItems: %zd", addedItemCount);
-    self.lastRangeLength += addedItemCount;
-    // We only want to do this once, so clear the "previous last timestamp".
-    self.previousLastTimestamp = nil;
-}
-
-- (void)createNewMessageMappings
-{
-    if (self.thread.uniqueId.length > 0) {
-        self.messageMappings = [[YapDatabaseViewMappings alloc] initWithGroups:@[ self.thread.uniqueId ]
-                                                                          view:TSMessageDatabaseViewExtensionName];
-    } else {
-        OWSFailDebug(@"uniqueId unexpectedly empty for thread: %@", self.thread);
-        self.messageMappings =
-            [[YapDatabaseViewMappings alloc] initWithGroups:@[] view:TSMessageDatabaseViewExtensionName];
-    }
-
-    // Cells' appearance can depend on adjacent cells in both directions.
-    [self.messageMappings setCellDrawingDependencyOffsets:[NSSet setWithArray:@[
-        @(-1),
-        @(+1),
-    ]]
-                                                 forGroup:self.thread.uniqueId];
-
-    [self.uiDatabaseConnection readWithBlock:^(YapDatabaseReadTransaction *transaction) {
-        [self.messageMappings updateWithTransaction:transaction];
-    }];
-    // We need to impose the range restrictions on the mappings immediately to avoid
-    // doing a great deal of unnecessary work and causing a perf hotspot.
-    [self updateMessageMappingRangeOptions];
-}
-
-- (void)resetMappings
-{
-    // If we're entering "active" mode (e.g. view is visible and app is in foreground),
-    // reset all state updated by yapDatabaseModified:.
-    if (self.messageMappings != nil) {
-        // Before we begin observing database modifications, make sure
-        // our mapping and table state is up-to-date.
-        [self extendRangeToIncludeUnobservedItems];
-        [self.uiDatabaseConnection readWithBlock:^(YapDatabaseReadTransaction *transaction) {
-            [self.messageMappings updateWithTransaction:transaction];
-        }];
-        [self updateMessageMappingRangeOptions];
-    }
-    self.collapseCutoffDate = [NSDate new];
-
-    [self resetContentAndLayout];
-    [self ensureDynamicInteractions];
-    [self updateBackButtonUnreadCount];
-    [self updateNavigationBarSubtitleLabel];
-
-    // There appears to be a bug in YapDatabase that sometimes delays modifications
-    // made in another process (e.g. the SAE) from showing up in other processes.
-    // There's a simple workaround: a trivial write to the database flushes changes
-    // made from other processes.
-    [self.editingDatabaseConnection asyncReadWriteWithBlock:^(YapDatabaseReadWriteTransaction *transaction) {
-        [transaction setObject:[NSUUID UUID].UUIDString forKey:@"conversation_view_noop_mod" inCollection:@"temp"];
-    }];
 }
 
 #pragma mark - ConversationCollectionViewDelegate
@@ -4850,321 +4142,12 @@ typedef enum : NSUInteger {
 
     [self updateLastVisibleTimestamp];
     self.conversationStyle.viewWidth = self.collectionView.width;
+    [self.collectionView.collectionViewLayout invalidateLayout];
 }
 
 #pragma mark - View Items
 
-// This is a key method.  It builds or rebuilds the list of
-// cell view models.
-//
-// Returns NO on error.
-- (BOOL)reloadViewItems
-{
-    NSMutableArray<ConversationViewItem *> *viewItems = [NSMutableArray new];
-    NSMutableDictionary<NSString *, ConversationViewItem *> *viewItemCache = [NSMutableDictionary new];
-
-    NSUInteger count = [self.messageMappings numberOfItemsInSection:0];
-    BOOL isGroupThread = self.isGroupConversation;
-
-    __block BOOL hasError = NO;
-    [self.uiDatabaseConnection readWithBlock:^(YapDatabaseReadTransaction *transaction) {
-        YapDatabaseViewTransaction *viewTransaction = [transaction ext:TSMessageDatabaseViewExtensionName];
-        OWSAssertDebug(viewTransaction);
-        for (NSUInteger row = 0; row < count; row++) {
-            TSInteraction *interaction =
-                [viewTransaction objectAtRow:row inSection:0 withMappings:self.messageMappings];
-            if (!interaction) {
-                OWSFailDebug(
-                    @"missing interaction in message mappings: %lu / %lu.", (unsigned long)row, (unsigned long)count);
-                // TODO: Add analytics.
-                hasError = YES;
-                continue;
-            }
-            if (!interaction.uniqueId) {
-                OWSFailDebug(@"invalid interaction in message mappings: %lu / %lu: %@.",
-                    (unsigned long)row,
-                    (unsigned long)count,
-                    interaction);
-                // TODO: Add analytics.
-                hasError = YES;
-                continue;
-            }
-
-            ConversationViewItem *_Nullable viewItem = self.viewItemCache[interaction.uniqueId];
-            if (!viewItem) {
-                viewItem = [[ConversationViewItem alloc] initWithInteraction:interaction
-                                                               isGroupThread:isGroupThread
-                                                                 transaction:transaction
-                                                           conversationStyle:self.conversationStyle];
-            }
-            [viewItems addObject:viewItem];
-            OWSAssertDebug(!viewItemCache[interaction.uniqueId]);
-            viewItemCache[interaction.uniqueId] = viewItem;
-        }
-    }];
-
-    // Flag to ensure that we only increment once per launch.
-    if (hasError) {
-        OWSLogWarn(@"incrementing version of: %@", TSMessageDatabaseViewExtensionName);
-        [OWSPrimaryStorage incrementVersionOfDatabaseExtension:TSMessageDatabaseViewExtensionName];
-    }
-
-    // Update the "break" properties (shouldShowDate and unreadIndicator) of the view items.
-    BOOL shouldShowDateOnNextViewItem = YES;
-    uint64_t previousViewItemTimestamp = 0;
-    OWSUnreadIndicator *_Nullable unreadIndicator = self.dynamicInteractions.unreadIndicator;
-    uint64_t collapseCutoffTimestamp = [NSDate ows_millisecondsSince1970ForDate:self.collapseCutoffDate];
-
-    BOOL hasPlacedUnreadIndicator = NO;
-    for (ConversationViewItem *viewItem in viewItems) {
-        BOOL canShowDate = NO;
-        switch (viewItem.interaction.interactionType) {
-            case OWSInteractionType_Unknown:
-            case OWSInteractionType_Offer:
-                canShowDate = NO;
-                break;
-            case OWSInteractionType_IncomingMessage:
-            case OWSInteractionType_OutgoingMessage:
-            case OWSInteractionType_Error:
-            case OWSInteractionType_Info:
-            case OWSInteractionType_Call:
-                canShowDate = YES;
-                break;
-        }
-
-        uint64_t viewItemTimestamp = viewItem.interaction.timestampForSorting;
-        OWSAssertDebug(viewItemTimestamp > 0);
-
-        BOOL shouldShowDate = NO;
-        if (previousViewItemTimestamp == 0) {
-            shouldShowDateOnNextViewItem = YES;
-        } else if (![DateUtil isSameDayWithTimestamp:previousViewItemTimestamp timestamp:viewItemTimestamp]) {
-            shouldShowDateOnNextViewItem = YES;
-        }
-
-        if (shouldShowDateOnNextViewItem && canShowDate) {
-            shouldShowDate = YES;
-            shouldShowDateOnNextViewItem = NO;
-        }
-
-        viewItem.shouldShowDate = shouldShowDate;
-
-        previousViewItemTimestamp = viewItemTimestamp;
-
-        // When a conversation without unread messages receives an incoming message,
-        // we call ensureDynamicInteractions to ensure that the unread indicator (etc.)
-        // state is updated accordingly.  However this is done in a separate transaction.
-        // We don't want to show the incoming message _without_ an unread indicator and
-        // then immediately re-render it _with_ an unread indicator.
-        //
-        // To avoid this, we use a temporary instance of OWSUnreadIndicator whenever
-        // we find an unread message that _should_ have an unread indicator, but no
-        // unread indicator exists yet on dynamicInteractions.
-        BOOL isItemUnread = ([viewItem.interaction conformsToProtocol:@protocol(OWSReadTracking)]
-            && !((id<OWSReadTracking>)viewItem.interaction).wasRead);
-        if (isItemUnread && !unreadIndicator && !hasPlacedUnreadIndicator && !self.hasClearedUnreadMessagesIndicator) {
-
-            unreadIndicator =
-                [[OWSUnreadIndicator alloc] initUnreadIndicatorWithTimestamp:viewItem.interaction.timestamp
-                                                       hasMoreUnseenMessages:NO
-                                        missingUnseenSafetyNumberChangeCount:0
-                                                     unreadIndicatorPosition:0
-                                             firstUnseenInteractionTimestamp:viewItem.interaction.timestamp];
-        }
-
-        // Place the unread indicator onto the first appropriate view item,
-        // if any.
-        if (unreadIndicator && viewItem.interaction.timestampForSorting >= unreadIndicator.timestamp) {
-            viewItem.unreadIndicator = unreadIndicator;
-            unreadIndicator = nil;
-            hasPlacedUnreadIndicator = YES;
-        } else {
-            viewItem.unreadIndicator = nil;
-        }
-    }
-    if (unreadIndicator) {
-        // This isn't necessarily a bug - all of the interactions after the
-        // unread indicator may have disappeared or been deleted.
-        OWSLogWarn(@"Couldn't find an interaction to hang the unread indicator on.");
-    }
-
-    // Update the properties of the view items.
-    //
-    // NOTE: This logic uses the break properties which are set in the previous pass.
-    for (NSUInteger i = 0; i < viewItems.count; i++) {
-        ConversationViewItem *viewItem = viewItems[i];
-        ConversationViewItem *_Nullable previousViewItem = (i > 0 ? viewItems[i - 1] : nil);
-        ConversationViewItem *_Nullable nextViewItem = (i + 1 < viewItems.count ? viewItems[i + 1] : nil);
-        BOOL shouldShowSenderAvatar = NO;
-        BOOL shouldHideFooter = NO;
-        BOOL isFirstInCluster = YES;
-        BOOL isLastInCluster = YES;
-        NSAttributedString *_Nullable senderName = nil;
-
-        OWSInteractionType interactionType = viewItem.interaction.interactionType;
-        NSString *timestampText = [DateUtil formatTimestampShort:viewItem.interaction.timestamp];
-
-        if (interactionType == OWSInteractionType_OutgoingMessage) {
-            TSOutgoingMessage *outgoingMessage = (TSOutgoingMessage *)viewItem.interaction;
-            MessageReceiptStatus receiptStatus =
-                [MessageRecipientStatusUtils recipientStatusWithOutgoingMessage:outgoingMessage];
-            BOOL isDisappearingMessage = outgoingMessage.isExpiringMessage;
-
-            if (nextViewItem && nextViewItem.interaction.interactionType == interactionType) {
-                TSOutgoingMessage *nextOutgoingMessage = (TSOutgoingMessage *)nextViewItem.interaction;
-                MessageReceiptStatus nextReceiptStatus =
-                    [MessageRecipientStatusUtils recipientStatusWithOutgoingMessage:nextOutgoingMessage];
-                NSString *nextTimestampText = [DateUtil formatTimestampShort:nextViewItem.interaction.timestamp];
-
-                // We can skip the "outgoing message status" footer if the next message
-                // has the same footer and no "date break" separates us...
-                // ...but always show "failed to send" status
-                // ...and always show the "disappearing messages" animation.
-                shouldHideFooter
-                    = ([timestampText isEqualToString:nextTimestampText] && receiptStatus == nextReceiptStatus
-                        && outgoingMessage.messageState != TSOutgoingMessageStateFailed && !nextViewItem.hasCellHeader
-                        && !isDisappearingMessage);
-            }
-
-            // clustering
-            if (previousViewItem == nil) {
-                isFirstInCluster = YES;
-            } else if (viewItem.hasCellHeader) {
-                isFirstInCluster = YES;
-            } else {
-                isFirstInCluster = previousViewItem.interaction.interactionType != OWSInteractionType_OutgoingMessage;
-            }
-
-            if (nextViewItem == nil) {
-                isLastInCluster = YES;
-            } else if (nextViewItem.hasCellHeader) {
-                isLastInCluster = YES;
-            } else {
-                isLastInCluster = nextViewItem.interaction.interactionType != OWSInteractionType_OutgoingMessage;
-            }
-        } else if (interactionType == OWSInteractionType_IncomingMessage) {
-
-            TSIncomingMessage *incomingMessage = (TSIncomingMessage *)viewItem.interaction;
-            NSString *incomingSenderId = incomingMessage.authorId;
-            OWSAssertDebug(incomingSenderId.length > 0);
-            BOOL isDisappearingMessage = incomingMessage.isExpiringMessage;
-
-            NSString *_Nullable nextIncomingSenderId = nil;
-            if (nextViewItem && nextViewItem.interaction.interactionType == interactionType) {
-                TSIncomingMessage *nextIncomingMessage = (TSIncomingMessage *)nextViewItem.interaction;
-                nextIncomingSenderId = nextIncomingMessage.authorId;
-                OWSAssertDebug(nextIncomingSenderId.length > 0);
-            }
-
-            if (nextViewItem && nextViewItem.interaction.interactionType == interactionType) {
-                NSString *nextTimestampText = [DateUtil formatTimestampShort:nextViewItem.interaction.timestamp];
-                // We can skip the "incoming message status" footer in a cluster if the next message
-                // has the same footer and no "date break" separates us.
-                // ...but always show the "disappearing messages" animation.
-                shouldHideFooter = ([timestampText isEqualToString:nextTimestampText] && !nextViewItem.hasCellHeader &&
-                    [NSObject isNullableObject:nextIncomingSenderId equalTo:incomingSenderId]
-                    && !isDisappearingMessage);
-            }
-
-            // clustering
-            if (previousViewItem == nil) {
-                isFirstInCluster = YES;
-            } else if (viewItem.hasCellHeader) {
-                isFirstInCluster = YES;
-            } else if (previousViewItem.interaction.interactionType != OWSInteractionType_IncomingMessage) {
-                isFirstInCluster = YES;
-            } else {
-                TSIncomingMessage *previousIncomingMessage = (TSIncomingMessage *)previousViewItem.interaction;
-                isFirstInCluster = ![incomingSenderId isEqual:previousIncomingMessage.authorId];
-            }
-
-            if (nextViewItem == nil) {
-                isLastInCluster = YES;
-            } else if (nextViewItem.interaction.interactionType != OWSInteractionType_IncomingMessage) {
-                isLastInCluster = YES;
-            } else if (nextViewItem.hasCellHeader) {
-                isLastInCluster = YES;
-            } else {
-                TSIncomingMessage *nextIncomingMessage = (TSIncomingMessage *)nextViewItem.interaction;
-                isLastInCluster = ![incomingSenderId isEqual:nextIncomingMessage.authorId];
-            }
-
-            if (viewItem.isGroupThread) {
-                // Show the sender name for incoming group messages unless
-                // the previous message has the same sender name and
-                // no "date break" separates us.
-                BOOL shouldShowSenderName = YES;
-                if (previousViewItem && previousViewItem.interaction.interactionType == interactionType) {
-
-                    TSIncomingMessage *previousIncomingMessage = (TSIncomingMessage *)previousViewItem.interaction;
-                    NSString *previousIncomingSenderId = previousIncomingMessage.authorId;
-                    OWSAssertDebug(previousIncomingSenderId.length > 0);
-
-                    shouldShowSenderName
-                        = (![NSObject isNullableObject:previousIncomingSenderId equalTo:incomingSenderId]
-                            || viewItem.hasCellHeader);
-                }
-                if (shouldShowSenderName) {
-                    senderName = [self.contactsManager
-                        attributedContactOrProfileNameForPhoneIdentifier:incomingSenderId
-                                                       primaryAttributes:[OWSMessageBubbleView
-                                                                             senderNamePrimaryAttributes]
-                                                     secondaryAttributes:[OWSMessageBubbleView
-                                                                             senderNameSecondaryAttributes]];
-                }
-
-                // Show the sender avatar for incoming group messages unless
-                // the next message has the same sender avatar and
-                // no "date break" separates us.
-                shouldShowSenderAvatar = YES;
-                if (nextViewItem && nextViewItem.interaction.interactionType == interactionType) {
-                    shouldShowSenderAvatar = (![NSObject isNullableObject:nextIncomingSenderId equalTo:incomingSenderId]
-                        || nextViewItem.hasCellHeader);
-                }
-            }
-        }
-
-        if (viewItem.interaction.timestampForSorting > collapseCutoffTimestamp) {
-            shouldHideFooter = NO;
-        }
-
-        viewItem.isFirstInCluster = isFirstInCluster;
-        viewItem.isLastInCluster = isLastInCluster;
-        viewItem.shouldShowSenderAvatar = shouldShowSenderAvatar;
-        viewItem.shouldHideFooter = shouldHideFooter;
-        viewItem.senderName = senderName;
-    }
-
-    self.viewItems = viewItems;
-    self.viewItemCache = viewItemCache;
-
-    return !hasError;
-}
-
-// Whenever an interaction is modified, we need to reload it from the DB
-// and update the corresponding view item.
-- (void)reloadInteractionForViewItem:(ConversationViewItem *)viewItem
-{
-    OWSAssertIsOnMainThread();
-    OWSAssertDebug(viewItem);
-
-    // This should never happen, but don't crash in production if we have a bug.
-    if (!viewItem) {
-        return;
-    }
-
-    [self.uiDatabaseConnection readWithBlock:^(YapDatabaseReadTransaction *transaction) {
-        TSInteraction *_Nullable interaction =
-            [TSInteraction fetchObjectWithUniqueID:viewItem.interaction.uniqueId transaction:transaction];
-        if (!interaction) {
-            OWSFailDebug(@"could not reload interaction");
-        } else {
-            [viewItem replaceInteraction:interaction transaction:transaction];
-        }
-    }];
-}
-
-- (nullable ConversationViewItem *)viewItemForIndex:(NSInteger)index
+- (nullable id<ConversationViewItem>)viewItemForIndex:(NSInteger)index
 {
     if (index < 0 || index >= (NSInteger)self.viewItems.count) {
         OWSFailDebug(@"Invalid view item index: %lu", (unsigned long)index);
@@ -5183,7 +4166,7 @@ typedef enum : NSUInteger {
 - (UICollectionViewCell *)collectionView:(UICollectionView *)collectionView
                   cellForItemAtIndexPath:(NSIndexPath *)indexPath
 {
-    ConversationViewItem *_Nullable viewItem = [self viewItemForIndex:indexPath.row];
+    id<ConversationViewItem> _Nullable viewItem = [self viewItemForIndex:indexPath.row];
     ConversationViewCell *cell = [viewItem dequeueCellForCollectionView:self.collectionView indexPath:indexPath];
     if (!cell) {
         OWSFailDebug(@"Could not dequeue cell.");
@@ -5368,6 +4351,248 @@ typedef enum : NSUInteger {
     }
 
     [super presentViewController:viewController animated:animated completion:completion];
+}
+
+#pragma mark - ConversationViewModelDelegate
+
+- (BOOL)isObservingVMUpdates
+{
+    return self.shouldObserveVMUpdates;
+}
+
+- (void)conversationViewModelWillUpdate
+{
+    OWSAssertIsOnMainThread();
+    OWSAssertDebug(self.conversationViewModel);
+
+    OWSLogVerbose(@"");
+
+    // HACK to work around radar #28167779
+    // "UICollectionView performBatchUpdates can trigger a crash if the collection view is flagged for layout"
+    // more: https://github.com/PSPDFKit-labs/radar.apple.com/tree/master/28167779%20-%20CollectionViewBatchingIssue
+    // This was our #2 crash, and much exacerbated by the refactoring somewhere between 2.6.2.0-2.6.3.8
+    //
+    // NOTE: It's critical we do this before beginLongLivedReadTransaction.
+    //       We want to relayout our contents using the old message mappings and
+    //       view items before they are updated.
+    [self.collectionView layoutIfNeeded];
+    // ENDHACK to work around radar #28167779
+}
+
+- (void)conversationViewModelDidUpdate:(ConversationUpdate *)conversationUpdate
+{
+    OWSAssertIsOnMainThread();
+    OWSAssertDebug(conversationUpdate);
+    OWSAssertDebug(self.conversationViewModel);
+
+    if (!self.shouldObserveVMUpdates) {
+        return;
+    }
+
+    OWSLogVerbose(@"");
+
+    [self updateBackButtonUnreadCount];
+    [self updateNavigationBarSubtitleLabel];
+
+    if (self.isGroupConversation) {
+        [self.uiDatabaseConnection readWithBlock:^(YapDatabaseReadTransaction *transaction) {
+            [self.thread reloadWithTransaction:transaction];
+        }];
+        [self updateNavigationTitle];
+    }
+
+    [self updateDisappearingMessagesConfiguration];
+
+    if (conversationUpdate.conversationUpdateType == ConversationUpdateType_Minor) {
+        return;
+    } else if (conversationUpdate.conversationUpdateType == ConversationUpdateType_Reload) {
+        [self resetContentAndLayout];
+        [self updateLastVisibleTimestamp];
+        [self scrollToBottomAnimated:NO];
+        return;
+    }
+
+    OWSAssertDebug(conversationUpdate.conversationUpdateType == ConversationUpdateType_Diff);
+    OWSAssertDebug(conversationUpdate.updateItems);
+
+    BOOL wasAtBottom = [self isScrolledToBottom];
+    // We want sending messages to feel snappy.  So, if the only
+    // update is a new outgoing message AND we're already scrolled to
+    // the bottom of the conversation, skip the scroll animation.
+    __block BOOL shouldAnimateScrollToBottom = !wasAtBottom;
+    // We want to scroll to the bottom if the user:
+    //
+    // a) already was at the bottom of the conversation.
+    // b) is inserting new interactions.
+    __block BOOL scrollToBottom = wasAtBottom;
+
+    void (^batchUpdates)(void) = ^{
+        OWSAssertIsOnMainThread();
+
+        const NSUInteger section = 0;
+        BOOL hasInserted = NO, hasUpdated = NO;
+        for (ConversationUpdateItem *updateItem in conversationUpdate.updateItems) {
+            switch (updateItem.updateItemType) {
+                case ConversationUpdateItemType_Delete: {
+                    // Always perform deletes before inserts and updates.
+                    OWSAssertDebug(!hasInserted && !hasUpdated);
+                    [self.collectionView deleteItemsAtIndexPaths:@[
+                        [NSIndexPath indexPathForRow:(NSInteger)updateItem.oldIndex inSection:section]
+                    ]];
+                    break;
+                }
+                case ConversationUpdateItemType_Insert: {
+                    // Always perform inserts before updates.
+                    OWSAssertDebug(!hasUpdated);
+                    [self.collectionView insertItemsAtIndexPaths:@[
+                        [NSIndexPath indexPathForRow:(NSInteger)updateItem.newIndex inSection:section]
+                    ]];
+                    hasInserted = YES;
+
+                    id<ConversationViewItem> viewItem = updateItem.viewItem;
+                    OWSAssertDebug(viewItem);
+                    if ([viewItem.interaction isKindOfClass:[TSOutgoingMessage class]]) {
+                        TSOutgoingMessage *outgoingMessage = (TSOutgoingMessage *)viewItem.interaction;
+                        if (!outgoingMessage.isFromLinkedDevice) {
+                            scrollToBottom = YES;
+                            shouldAnimateScrollToBottom = NO;
+                        }
+                    }
+
+                    break;
+                }
+                case ConversationUpdateItemType_Update: {
+                    [self.collectionView reloadItemsAtIndexPaths:@[
+                        [NSIndexPath indexPathForRow:(NSInteger)updateItem.newIndex inSection:section]
+                    ]];
+                    hasUpdated = YES;
+                    break;
+                }
+            }
+        }
+    };
+
+    BOOL shouldAnimateUpdates = conversationUpdate.shouldAnimateUpdates;
+    void (^batchUpdatesCompletion)(BOOL) = ^(BOOL finished) {
+        OWSAssertIsOnMainThread();
+
+        if (!finished) {
+            OWSLogInfo(@"performBatchUpdates did not finish");
+        }
+
+        [self updateLastVisibleTimestamp];
+
+        if (scrollToBottom && shouldAnimateUpdates) {
+            [self scrollToBottomAnimated:shouldAnimateScrollToBottom];
+        }
+    };
+
+    @try {
+        if (shouldAnimateUpdates) {
+            [self.collectionView performBatchUpdates:batchUpdates completion:batchUpdatesCompletion];
+
+        } else {
+            // HACK: We use `UIView.animateWithDuration:0` rather than `UIView.performWithAnimation` to work around a
+            // UIKit Crash like:
+            //
+            //     *** Assertion failure in -[ConversationViewLayout prepareForCollectionViewUpdates:],
+            //     /BuildRoot/Library/Caches/com.apple.xbs/Sources/UIKit_Sim/UIKit-3600.7.47/UICollectionViewLayout.m:760
+            //     *** Terminating app due to uncaught exception 'NSInternalInconsistencyException', reason: 'While
+            //     preparing update a visible view at <NSIndexPath: 0xc000000011c00016> {length = 2, path = 0 - 142}
+            //     wasn't found in the current data model and was not in an update animation. This is an internal
+            //     error.'
+            //
+            // I'm unclear if this is a bug in UIKit, or if we're doing something crazy in
+            // ConversationViewLayout#prepareLayout. To reproduce, rapidily insert and delete items into the
+            // conversation. See `DebugUIMessages#thrashCellsInThread:`
+            [UIView
+                animateWithDuration:0.0
+                         animations:^{
+                             [self.collectionView performBatchUpdates:batchUpdates completion:batchUpdatesCompletion];
+                             if (scrollToBottom) {
+                                 [self scrollToBottomAnimated:NO];
+                             }
+                         }];
+        }
+    } @catch (NSException *exception) {
+        OWSFailDebug(@"exception: %@ of type: %@ with reason: %@, user info: %@.",
+            exception.description,
+            exception.name,
+            exception.reason,
+            exception.userInfo);
+
+        for (ConversationUpdateItem *updateItem in conversationUpdate.updateItems) {
+            switch (updateItem.updateItemType) {
+                case ConversationUpdateItemType_Delete:
+                    OWSLogWarn(@"ConversationUpdateItemType_Delete class: %@, itemId: %@, oldIndex: %lu, "
+                               @"newIndex: %lu",
+                        [updateItem.viewItem class],
+                        updateItem.viewItem.itemId,
+                        (unsigned long)updateItem.oldIndex,
+                        (unsigned long)updateItem.newIndex);
+                    break;
+                case ConversationUpdateItemType_Insert:
+                    OWSLogWarn(@"ConversationUpdateItemType_Insert class: %@, itemId: %@, oldIndex: %lu, "
+                               @"newIndex: %lu",
+                        [updateItem.viewItem class],
+                        updateItem.viewItem.itemId,
+                        (unsigned long)updateItem.oldIndex,
+                        (unsigned long)updateItem.newIndex);
+                    break;
+                case ConversationUpdateItemType_Update:
+                    OWSLogWarn(@"ConversationUpdateItemType_Update class: %@, itemId: %@, oldIndex: %lu, "
+                               @"newIndex: %lu",
+                        [updateItem.viewItem class],
+                        updateItem.viewItem.itemId,
+                        (unsigned long)updateItem.oldIndex,
+                        (unsigned long)updateItem.newIndex);
+                    break;
+            }
+        }
+
+        @throw exception;
+    }
+
+    self.lastReloadDate = [NSDate new];
+}
+
+- (void)conversationViewModelWillLoadMoreItems
+{
+    OWSAssertIsOnMainThread();
+    OWSAssertDebug(self.conversationViewModel);
+
+    // We want to restore the current scroll state after we update the range, update
+    // the dynamic interactions and re-layout.  Here we take a "before" snapshot.
+    self.scrollDistanceToBottomSnapshot = self.safeContentHeight - self.collectionView.contentOffset.y;
+}
+
+- (void)conversationViewModelDidLoadMoreItems
+{
+    OWSAssertIsOnMainThread();
+    OWSAssertDebug(self.conversationViewModel);
+
+    [self.layout prepareLayout];
+
+    self.collectionView.contentOffset = CGPointMake(0, self.safeContentHeight - self.scrollDistanceToBottomSnapshot);
+}
+
+- (void)conversationViewModelDidLoadPrevPage
+{
+    OWSAssertIsOnMainThread();
+    OWSAssertDebug(self.conversationViewModel);
+
+    [self scrollToUnreadIndicatorAnimated];
+}
+
+- (void)conversationViewModelRangeDidChange
+{
+    OWSAssertIsOnMainThread();
+
+    if (!self.conversationViewModel) {
+        return;
+    }
+
+    [self updateShowLoadMoreHeader];
 }
 
 @end

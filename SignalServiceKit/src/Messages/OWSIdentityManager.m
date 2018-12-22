@@ -5,7 +5,6 @@
 #import "OWSIdentityManager.h"
 #import "AppContext.h"
 #import "AppReadiness.h"
-#import "NSDate+OWS.h"
 #import "NSNotificationCenter+OWS.h"
 #import "NotificationsProtocol.h"
 #import "OWSError.h"
@@ -26,6 +25,7 @@
 #import "YapDatabaseTransaction+OWS.h"
 #import <AxolotlKit/NSData+keyVersionByte.h>
 #import <Curve25519Kit/Curve25519.h>
+#import <SignalCoreKit/NSDate+OWS.h>
 #import <SignalServiceKit/SignalServiceKit-Swift.h>
 #import <YapDatabase/YapDatabase.h>
 
@@ -98,12 +98,16 @@ NSString *const kNSNotificationName_IdentityStateDidChange = @"kNSNotificationNa
     [[NSNotificationCenter defaultCenter] removeObserver:self];
 }
 
+#pragma mark - Dependencies
+
 - (OWSMessageSender *)messageSender
 {
     OWSAssertDebug(SSKEnvironment.shared.messageSender);
 
     return SSKEnvironment.shared.messageSender;
 }
+
+#pragma mark -
 
 - (void)observeNotifications
 {
@@ -127,6 +131,15 @@ NSString *const kNSNotificationName_IdentityStateDidChange = @"kNSNotificationNa
         result = [self identityKeyForRecipientId:recipientId transaction:transaction];
     }];
     return result;
+}
+
+- (nullable NSData *)identityKeyForRecipientId:(NSString *)recipientId protocolContext:(nullable id)protocolContext
+{
+    OWSAssertDebug([protocolContext isKindOfClass:[YapDatabaseReadTransaction class]]);
+
+    YapDatabaseReadTransaction *transaction = protocolContext;
+
+    return [self identityKeyForRecipientId:recipientId transaction:transaction];
 }
 
 - (nullable NSData *)identityKeyForRecipientId:(NSString *)recipientId
@@ -556,7 +569,7 @@ NSString *const kNSNotificationName_IdentityStateDidChange = @"kNSNotificationNa
 {
     OWSAssertIsOnMainThread();
 
-    [AppReadiness runNowOrWhenAppIsReady:^{
+    [AppReadiness runNowOrWhenAppDidBecomeReady:^{
         [self syncQueuedVerificationStates];
     }];
 }
@@ -627,16 +640,20 @@ NSString *const kNSNotificationName_IdentityStateDidChange = @"kNSNotificationNa
     // subsequently
     OWSOutgoingNullMessage *nullMessage = [[OWSOutgoingNullMessage alloc] initWithContactThread:contactThread
                                                                    verificationStateSyncMessage:message];
-    [self.messageSender enqueueMessage:nullMessage
+
+    // DURABLE CLEANUP - we could replace the custom durability logic in this class
+    // with a durable JobQueue.
+    [self.messageSender sendMessage:nullMessage
         success:^{
             OWSLogInfo(@"Successfully sent verification state NullMessage");
-            [self.messageSender enqueueMessage:message
+            [self.messageSender sendMessage:message
                 success:^{
                     OWSLogInfo(@"Successfully sent verification state sync message");
 
                     // Record that this verification state was successfully synced.
-                    [self.dbConnection readWriteWithBlock:^(YapDatabaseReadWriteTransaction * transaction) {
-                        [self clearSyncMessageForRecipientId:message.verificationForRecipientId transaction:transaction];
+                    [self.dbConnection readWriteWithBlock:^(YapDatabaseReadWriteTransaction *transaction) {
+                        [self clearSyncMessageForRecipientId:message.verificationForRecipientId
+                                                 transaction:transaction];
                     }];
                 }
                 failure:^(NSError *error) {
@@ -649,7 +666,7 @@ NSString *const kNSNotificationName_IdentityStateDidChange = @"kNSNotificationNa
                 OWSLogInfo(@"Removing retries for syncing verification state, since user is no longer registered: %@",
                     message.verificationForRecipientId);
                 // Otherwise this will fail forever.
-                [self.dbConnection readWriteWithBlock:^(YapDatabaseReadWriteTransaction * transaction) {
+                [self.dbConnection readWriteWithBlock:^(YapDatabaseReadWriteTransaction *transaction) {
                     [self clearSyncMessageForRecipientId:message.verificationForRecipientId transaction:transaction];
                 }];
             }
@@ -665,8 +682,8 @@ NSString *const kNSNotificationName_IdentityStateDidChange = @"kNSNotificationNa
     [transaction removeObjectForKey:recipientId inCollection:OWSIdentityManager_QueuedVerificationStateSyncMessages];
 }
 
-- (void)processIncomingSyncMessage:(SSKProtoVerified *)verified
-                       transaction:(YapDatabaseReadWriteTransaction *)transaction
+- (void)throws_processIncomingSyncMessage:(SSKProtoVerified *)verified
+                              transaction:(YapDatabaseReadWriteTransaction *)transaction
 {
     OWSAssertDebug(verified);
     OWSAssertDebug(transaction);
@@ -683,7 +700,7 @@ NSString *const kNSNotificationName_IdentityStateDidChange = @"kNSNotificationNa
             rawIdentityKey);
         return;
     }
-    NSData *identityKey = [rawIdentityKey removeKeyType];
+    NSData *identityKey = [rawIdentityKey throws_removeKeyType];
 
     switch (verified.state) {
         case SSKProtoVerifiedStateDefault:

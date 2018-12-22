@@ -6,7 +6,7 @@
 #import "OWSDeviceProvisioningCodeService.h"
 #import "OWSDeviceProvisioningService.h"
 #import "OWSFakeNetworkManager.h"
-#import "SSKBaseTest.h"
+#import "SSKBaseTestObjC.h"
 #import "TSNetworkManager.h"
 
 @interface OWSFakeDeviceProvisioningService : OWSDeviceProvisioningService
@@ -20,7 +20,7 @@
                          success:(void (^)())successCallback
                          failure:(void (^)(NSError *))failureCallback
 {
-    NSLog(@"faking successful provisioning");
+    OWSLogInfo(@"faking successful provisioning");
     successCallback();
 }
 
@@ -35,7 +35,7 @@
 - (void)requestProvisioningCodeWithSuccess:(void (^)(NSString *))successCallback
                                    failure:(void (^)(NSError *))failureCallback
 {
-    NSLog(@"faking successful provisioning code fetching");
+    OWSLogInfo(@"faking successful provisioning code fetching");
     successCallback(@"fake-provisioning-code");
 }
 
@@ -48,7 +48,7 @@
 
 @end
 
-@interface OWSDeviceProvisionerTest : SSKBaseTest
+@interface OWSDeviceProvisionerTest : SSKBaseTestObjC
 
 @end
 
@@ -90,7 +90,7 @@
     [self waitForExpectationsWithTimeout:5.0
                                  handler:^(NSError *error) {
                                      if (error) {
-                                         NSLog(@"Timeout Error: %@", error);
+                                         OWSLogInfo(@"Timeout Error: %@", error);
                                      }
                                  }];
 }

@@ -2,9 +2,8 @@
 //  Copyright (c) 2018 Open Whisper Systems. All rights reserved.
 //
 
-#import "Cryptography.h"
 #import "OWSPrimaryStorage.h"
-#import "SSKBaseTest.h"
+#import "SSKBaseTestObjC.h"
 #import "TSContactThread.h"
 #import "TSGroupThread.h"
 #import "TSIncomingMessage.h"
@@ -12,8 +11,9 @@
 #import "TSOutgoingMessage.h"
 #import "TSThread.h"
 #import "YapDatabaseConnection+OWS.h"
+#import <SignalCoreKit/Cryptography.h>
 
-@interface TSMessageStorageTests : SSKBaseTest
+@interface TSMessageStorageTests : SSKBaseTestObjC
 
 @property TSContactThread *thread;
 

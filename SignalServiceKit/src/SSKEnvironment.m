@@ -21,6 +21,21 @@ static SSKEnvironment *sharedSSKEnvironment;
 @property (nonatomic) OWSMessageManager *messageManager;
 @property (nonatomic) OWSBlockingManager *blockingManager;
 @property (nonatomic) OWSIdentityManager *identityManager;
+@property (nonatomic) id<OWSUDManager> udManager;
+@property (nonatomic) OWSMessageDecrypter *messageDecrypter;
+@property (nonatomic) OWSBatchMessageProcessor *batchMessageProcessor;
+@property (nonatomic) OWSMessageReceiver *messageReceiver;
+@property (nonatomic) TSSocketManager *socketManager;
+@property (nonatomic) TSAccountManager *tsAccountManager;
+@property (nonatomic) OWS2FAManager *ows2FAManager;
+@property (nonatomic) OWSDisappearingMessagesJob *disappearingMessagesJob;
+@property (nonatomic) ContactDiscoveryService *contactDiscoveryService;
+@property (nonatomic) OWSReadReceiptManager *readReceiptManager;
+@property (nonatomic) OWSOutgoingReceiptManager *outgoingReceiptManager;
+@property (nonatomic) id<OWSSyncManagerProtocol> syncManager;
+@property (nonatomic) id<SSKReachabilityManager> reachabilityManager;
+@property (nonatomic) id<OWSTypingIndicators> typingIndicators;
+@property (nonatomic) OWSAttachmentDownloads *attachmentDownloads;
 
 @end
 
@@ -31,9 +46,13 @@ static SSKEnvironment *sharedSSKEnvironment;
 @synthesize callMessageHandler = _callMessageHandler;
 @synthesize notificationsManager = _notificationsManager;
 @synthesize objectReadWriteConnection = _objectReadWriteConnection;
+@synthesize sessionStoreDBConnection = _sessionStoreDBConnection;
+@synthesize migrationDBConnection = _migrationDBConnection;
+@synthesize analyticsDBConnection = _analyticsDBConnection;
 
 - (instancetype)initWithContactsManager:(id<ContactsManagerProtocol>)contactsManager
                           messageSender:(OWSMessageSender *)messageSender
+                  messageSenderJobQueue:(SSKMessageSenderJobQueue *)messageSenderJobQueue
                          profileManager:(id<ProfileManagerProtocol>)profileManager
                          primaryStorage:(OWSPrimaryStorage *)primaryStorage
                         contactsUpdater:(ContactsUpdater *)contactsUpdater
@@ -41,6 +60,21 @@ static SSKEnvironment *sharedSSKEnvironment;
                          messageManager:(OWSMessageManager *)messageManager
                         blockingManager:(OWSBlockingManager *)blockingManager
                         identityManager:(OWSIdentityManager *)identityManager
+                              udManager:(id<OWSUDManager>)udManager
+                       messageDecrypter:(OWSMessageDecrypter *)messageDecrypter
+                  batchMessageProcessor:(OWSBatchMessageProcessor *)batchMessageProcessor
+                        messageReceiver:(OWSMessageReceiver *)messageReceiver
+                          socketManager:(TSSocketManager *)socketManager
+                       tsAccountManager:(TSAccountManager *)tsAccountManager
+                          ows2FAManager:(OWS2FAManager *)ows2FAManager
+                disappearingMessagesJob:(OWSDisappearingMessagesJob *)disappearingMessagesJob
+                contactDiscoveryService:(ContactDiscoveryService *)contactDiscoveryService
+                     readReceiptManager:(OWSReadReceiptManager *)readReceiptManager
+                 outgoingReceiptManager:(OWSOutgoingReceiptManager *)outgoingReceiptManager
+                    reachabilityManager:(id<SSKReachabilityManager>)reachabilityManager
+                            syncManager:(id<OWSSyncManagerProtocol>)syncManager
+                       typingIndicators:(id<OWSTypingIndicators>)typingIndicators
+                    attachmentDownloads:(OWSAttachmentDownloads *)attachmentDownloads
 {
     self = [super init];
     if (!self) {
@@ -49,6 +83,7 @@ static SSKEnvironment *sharedSSKEnvironment;
 
     OWSAssertDebug(contactsManager);
     OWSAssertDebug(messageSender);
+    OWSAssertDebug(messageSenderJobQueue);
     OWSAssertDebug(profileManager);
     OWSAssertDebug(primaryStorage);
     OWSAssertDebug(contactsUpdater);
@@ -56,9 +91,25 @@ static SSKEnvironment *sharedSSKEnvironment;
     OWSAssertDebug(messageManager);
     OWSAssertDebug(blockingManager);
     OWSAssertDebug(identityManager);
+    OWSAssertDebug(udManager);
+    OWSAssertDebug(messageDecrypter);
+    OWSAssertDebug(batchMessageProcessor);
+    OWSAssertDebug(messageReceiver);
+    OWSAssertDebug(socketManager);
+    OWSAssertDebug(tsAccountManager);
+    OWSAssertDebug(ows2FAManager);
+    OWSAssertDebug(disappearingMessagesJob);
+    OWSAssertDebug(contactDiscoveryService);
+    OWSAssertDebug(readReceiptManager);
+    OWSAssertDebug(outgoingReceiptManager);
+    OWSAssertDebug(syncManager);
+    OWSAssertDebug(reachabilityManager);
+    OWSAssertDebug(typingIndicators);
+    OWSAssertDebug(attachmentDownloads);
 
     _contactsManager = contactsManager;
     _messageSender = messageSender;
+    _messageSenderJobQueue = messageSenderJobQueue;
     _profileManager = profileManager;
     _primaryStorage = primaryStorage;
     _contactsUpdater = contactsUpdater;
@@ -66,6 +117,21 @@ static SSKEnvironment *sharedSSKEnvironment;
     _messageManager = messageManager;
     _blockingManager = blockingManager;
     _identityManager = identityManager;
+    _udManager = udManager;
+    _messageDecrypter = messageDecrypter;
+    _batchMessageProcessor = batchMessageProcessor;
+    _messageReceiver = messageReceiver;
+    _socketManager = socketManager;
+    _tsAccountManager = tsAccountManager;
+    _ows2FAManager = ows2FAManager;
+    _disappearingMessagesJob = disappearingMessagesJob;
+    _contactDiscoveryService = contactDiscoveryService;
+    _readReceiptManager = readReceiptManager;
+    _outgoingReceiptManager = outgoingReceiptManager;
+    _syncManager = syncManager;
+    _reachabilityManager = reachabilityManager;
+    _typingIndicators = typingIndicators;
+    _attachmentDownloads = attachmentDownloads;
 
     return self;
 }
@@ -144,6 +210,34 @@ static SSKEnvironment *sharedSSKEnvironment;
         return _objectReadWriteConnection;
     }
 }
+
+- (YapDatabaseConnection *)sessionStoreDBConnection {
+    @synchronized(self) {
+        if (!_sessionStoreDBConnection) {
+            _sessionStoreDBConnection = self.primaryStorage.newDatabaseConnection;
+        }
+        return _sessionStoreDBConnection;
+    }
+}
+
+- (YapDatabaseConnection *)migrationDBConnection {
+    @synchronized(self) {
+        if (!_migrationDBConnection) {
+            _migrationDBConnection = self.primaryStorage.newDatabaseConnection;
+        }
+        return _migrationDBConnection;
+    }
+}
+
+- (YapDatabaseConnection *)analyticsDBConnection {
+    @synchronized(self) {
+        if (!_analyticsDBConnection) {
+            _analyticsDBConnection = self.primaryStorage.newDatabaseConnection;
+        }
+        return _analyticsDBConnection;
+    }
+}
+
 @end
 
 NS_ASSUME_NONNULL_END
